@@ -51,7 +51,13 @@ class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
         self._unsub_adapter: callable | None = None
 
     async def async_setup(self) -> None:
-        """Initial connect + register push listener."""
+        """Initial connect + register push listener.
+
+        Never propagates connection errors — the integration arrives in HA
+        with available=False and a background reconnect loop takes over.
+        Only AdapterAuthError propagates, since that requires user intervention
+        (re-pairing).
+        """
         self._unsub_adapter = self.adapter.add_listener(self._on_adapter_state)
         try:
             await self.adapter.connect()
@@ -65,8 +71,15 @@ class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
                 err,
             )
             self._schedule_reconnect()
+        except Exception as err:  # noqa: BLE001
+            # Anything else (a library raising something we don't model) should
+            # still degrade gracefully — don't break HA setup.
+            _LOGGER.exception(
+                "Unexpected error connecting to %s; will keep retrying", self.entry.title
+            )
+            self._schedule_reconnect()
 
-        # Push the initial state into HA.
+        # Push the initial state into HA (likely with available=False).
         self.async_set_updated_data(self.adapter.state)
 
     async def async_shutdown(self) -> None:

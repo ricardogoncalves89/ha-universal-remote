@@ -121,8 +121,15 @@ class LGWebOSAdapter(RemoteAdapter):
                 raise AdapterAuthError(
                     "TV refused pairing — accept the prompt on the TV and retry"
                 ) from err
-            except (OSError, asyncio.TimeoutError, WebOsTvServiceNotFoundError) as err:
-                raise AdapterConnectionError(f"Unable to reach TV: {err}") from err
+            except Exception as err:  # noqa: BLE001
+                # aiowebostv 0.7.x can raise a variety of exceptions during connect:
+                # OSError (network), asyncio.TimeoutError, WebOsTvServiceNotFoundError,
+                # aiohttp.WSMessageTypeError (TV in standby refusing handshake with code 1008),
+                # and others. Catch broadly so we can always degrade to ConfigEntryNotReady
+                # and let HA retry instead of failing setup permanently.
+                raise AdapterConnectionError(
+                    f"Unable to connect to TV: {type(err).__name__}: {err}"
+                ) from err
 
             # First-pair flow generates a key — surface it so the config flow can store it.
             if self._client.client_key and self._client.client_key != self._client_key:

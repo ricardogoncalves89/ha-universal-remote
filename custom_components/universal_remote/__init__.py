@@ -26,6 +26,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryAuthFailed(str(err)) from err
     except AdapterConnectionError as err:
         raise ConfigEntryNotReady(str(err)) from err
+    except Exception as err:  # noqa: BLE001
+        # Defensive: any unexpected exception during setup is treated as transient.
+        # HA will retry the entry instead of marking it permanently failed.
+        _LOGGER.exception("Unexpected error setting up %s", entry.title)
+        raise ConfigEntryNotReady(
+            f"Unexpected error: {type(err).__name__}: {err}"
+        ) from err
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
