@@ -35,8 +35,17 @@ class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
             update_interval=None,  # we don't poll; we push via adapter callbacks
         )
         self.entry = entry
+
+        async def _call_service(domain: str, service: str, data: dict) -> None:
+            """Thin wrapper passed to the adapter so it can invoke HA services
+            (wake_on_lan, etc.) without importing HA internals.
+            """
+            await hass.services.async_call(domain, service, data, blocking=True)
+
         self.adapter: RemoteAdapter = build_adapter(
-            entry.data[CONF_DEVICE_TYPE], dict(entry.data)
+            entry.data[CONF_DEVICE_TYPE],
+            dict(entry.data),
+            service_caller=_call_service,
         )
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_adapter: callable | None = None

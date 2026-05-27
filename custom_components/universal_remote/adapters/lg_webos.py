@@ -93,8 +93,12 @@ class LGWebOSAdapter(RemoteAdapter):
         Button.POWER_OFF,
     }
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config)
+    def __init__(
+        self,
+        config: dict[str, Any],
+        service_caller=None,
+    ) -> None:
+        super().__init__(config, service_caller)
         self._host: str = config[CONF_HOST]
         self._client_key: str | None = config.get(CONF_CLIENT_KEY)
         self._mac: str | None = config.get(CONF_MAC)
@@ -171,9 +175,12 @@ class LGWebOSAdapter(RemoteAdapter):
     async def press_button(self, button: str) -> None:
         # Power buttons short-circuit
         if button == Button.POWER:
-            if self._state.powered_on:
+            # Toggle. If state is unknown (websocket down → TV likely off),
+            # try to turn on; otherwise reflect current state.
+            if self._state.powered_on is True:
                 await self.turn_off()
             else:
+                # Covers both powered_on=False and powered_on=None.
                 await self.turn_on()
             return
         if button == Button.POWER_ON:
@@ -202,26 +209,45 @@ class LGWebOSAdapter(RemoteAdapter):
         raise UnsupportedButtonError(f"LG WebOS adapter does not support button {button!r}")
 
     async def turn_on(self) -> None:
-        # If the TV is off, the websocket is dead — only Wake-on-LAN can bring it back.
+        """Turn the TV on.
+
+        Strategy:
+        1. If we have a MAC, send a Wake-on-LAN magic packet via HA's wake_on_lan
+           service. This works even when the TV is fully off.
+        2. Otherwise, if we still have an open websocket (TV in standby), try the
+           webOS power_on command — only newer models with "LG Connect Apps" / mobile
+           wake-up enabled support this.
+        3. Otherwise, give up with a clear error.
+        """
         if self._mac:
-            from homeassistant.components.wake_on_lan import (  # local import: optional dep
-                wake_on_lan,
-            )
-            # NOTE: in the real coordinator we'll call hass.services.async_call("wake_on_lan", ...)
-            # instead, to avoid importing HA internals here. This is a placeholder for the standalone case.
-            wake_on_lan.send_magic_packet(self._mac)
-        elif self._client and self._client.is_connected():
-            # Some models support turning on from standby via websocket
+            if self._service_caller is None:
+                raise AdapterConnectionError(
+                    "No service caller available — adapter was built standalone"
+                )
+            try:
+                await self._service_caller(
+                    "wake_on_lan",
+                    "send_magic_packet",
+                    {"mac": self._mac},
+                )
+                return
+            except Exception as err:  # noqa: BLE001
+                raise AdapterConnectionError(
+                    f"Wake-on-LAN call failed: {err}"
+                ) from err
+
+        if self._client and self._client.is_connected():
             try:
                 await self._client.power_on()
+                return
             except Exception as err:  # noqa: BLE001
                 raise AdapterConnectionError(
                     "TV is off and no MAC address configured for Wake-on-LAN"
                 ) from err
-        else:
-            raise AdapterConnectionError(
-                "TV is off and no MAC address configured for Wake-on-LAN"
-            )
+
+        raise AdapterConnectionError(
+            "TV is off and no MAC address configured for Wake-on-LAN"
+        )
 
     async def turn_off(self) -> None:
         await self._ensure_connected()

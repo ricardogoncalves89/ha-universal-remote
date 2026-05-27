@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +27,11 @@ class DeviceState:
 
 
 StateCallback = Callable[[DeviceState], None]
+
+# Callback the coordinator provides so adapters can invoke HA services
+# (e.g. wake_on_lan.send_magic_packet) without importing HA internals.
+# Signature: async (domain, service, service_data) -> None
+ServiceCaller = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 
 
 class AdapterError(Exception):
@@ -56,9 +61,19 @@ class RemoteAdapter(ABC):
     # Calling press_button with a button outside this set raises UnsupportedButtonError.
     SUPPORTED_BUTTONS: set[str] = set()
 
-    def __init__(self, config: dict[str, Any]) -> None:
-        """Store config — connect() happens later, called by the coordinator."""
+    def __init__(
+        self,
+        config: dict[str, Any],
+        service_caller: ServiceCaller | None = None,
+    ) -> None:
+        """Store config — connect() happens later, called by the coordinator.
+
+        service_caller is injected by the coordinator and lets the adapter
+        invoke HA services (wake_on_lan, etc.) without importing HA internals.
+        It is optional so that adapters can also be used standalone in tests.
+        """
         self._config = config
+        self._service_caller = service_caller
         self._state = DeviceState()
         self._listeners: list[StateCallback] = []
 

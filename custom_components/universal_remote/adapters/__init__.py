@@ -9,18 +9,21 @@ from ..const import (
     DEVICE_TYPE_LG_WEBOS,
     DEVICE_TYPE_SAMSUNG,
 )
-from .base import RemoteAdapter
+from .base import RemoteAdapter, ServiceCaller
 
 
-def build_adapter(device_type: str, config: dict[str, Any]) -> RemoteAdapter:
+def build_adapter(
+    device_type: str,
+    config: dict[str, Any],
+    service_caller: ServiceCaller | None = None,
+) -> RemoteAdapter:
     """Return the adapter instance for the given device type."""
     if device_type == DEVICE_TYPE_LG_WEBOS:
         from .lg_webos import LGWebOSAdapter
 
-        return LGWebOSAdapter(config)
+        return LGWebOSAdapter(config, service_caller)
 
     if device_type == DEVICE_TYPE_SAMSUNG:
-        # Placeholder — implemented in the next iteration.
         raise NotImplementedError("Samsung adapter not implemented yet")
 
     if device_type == DEVICE_TYPE_ANDROID_TV:

@@ -29,7 +29,8 @@
     },
     "abort": {
       "already_configured": "This device is already configured.",
-      "device_type_not_implemented": "This device type isn't implemented yet."
+      "device_type_not_implemented": "This device type isn't implemented yet.",
+      "reconfigure_successful": "Settings updated and integration reloaded."
     }
   }
 }

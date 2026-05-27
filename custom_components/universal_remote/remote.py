@@ -15,7 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .adapters.base import UnsupportedButtonError
-from .const import CONF_DEVICE_TYPE, DEVICE_TYPE_LABELS, DOMAIN
+from .const import CONF_DEVICE_TYPE, DEVICE_TYPE_LABELS, DOMAIN, canonicalize_button
 from .coordinator import UniversalRemoteCoordinator
 
 
@@ -65,18 +65,23 @@ class UniversalRemoteRemote(CoordinatorEntity[UniversalRemoteCoordinator], Remot
         await self.coordinator.adapter.turn_off()
 
     async def async_send_command(self, command: Iterable[str], **kwargs: Any) -> None:
-        """Send one or more canonical button names.
+        """Send one or more button names.
 
-        Called as:
+        Names are case-insensitive and aliases are accepted — see
+        const.py:_ALIASES. Anything that can't be mapped raises ValueError.
+
             service: remote.send_command
             target: { entity_id: remote.tv_sala }
-            data:   { command: ["HOME"] }            # or ["NUM_1","NUM_2","NUM_3"]
-
-        kwargs may include: num_repeats, delay_secs, hold_secs — handled by HA core.
+            data:   { command: ["HOME"] }            # or ["power"], ["volume_up"], ...
         """
-        for cmd in command:
+        for raw in command:
+            canonical = canonicalize_button(raw)
+            if canonical is None:
+                raise ValueError(
+                    f"Unknown button {raw!r}. Use one of the canonical names "
+                    f"(see remote attribute 'supported_buttons') or a known alias."
+                )
             try:
-                await self.coordinator.adapter.press_button(cmd)
+                await self.coordinator.adapter.press_button(canonical)
             except UnsupportedButtonError as err:
-                # Re-raise as ValueError so HA shows a clear error to the user.
                 raise ValueError(str(err)) from err
