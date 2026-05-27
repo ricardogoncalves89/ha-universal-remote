@@ -113,7 +113,8 @@ class LGWebOSAdapter(RemoteAdapter):
                 return
 
             self._client = WebOsClient(self._host, self._client_key)
-            self._client.register_state_update_callback(self._on_tv_state)
+            # register_state_update_callback is async in aiowebostv 0.7+ — must be awaited.
+            await self._client.register_state_update_callback(self._on_tv_state)
 
             try:
                 await self._client.connect()
