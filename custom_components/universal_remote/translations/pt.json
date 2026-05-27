@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Adicionar TV ou box multimédia",
+        "description": "Escolhe o tipo de dispositivo que queres controlar.",
+        "data": {
+          "device_type": "Tipo de dispositivo"
+        }
+      },
+      "lg_webos": {
+        "title": "TV LG WebOS",
+        "description": "Indica o IP/hostname da TV. O MAC é opcional mas necessário para ligar a TV quando está totalmente desligada (Wake-on-LAN).",
+        "data": {
+          "name": "Nome",
+          "host": "Host / IP",
+          "mac": "Endereço MAC (opcional)"
+        }
+      },
+      "pair": {
+        "title": "Emparelhamento com a TV",
+        "description": "Olha para a TV em {host} e aceita o pedido de emparelhamento. Depois carrega em SUBMETER aqui."
+      }
+    },
+    "error": {
+      "cannot_connect": "Não consegui contactar o dispositivo.",
+      "pair_refused": "A TV recusou o emparelhamento. Aceita o pedido na TV e tenta novamente.",
+      "no_client_key": "Emparelhamento bem sucedido mas não foi devolvida uma chave."
+    },
+    "abort": {
+      "already_configured": "Este dispositivo já está configurado.",
+      "device_type_not_implemented": "Este tipo de dispositivo ainda não está implementado."
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a TV or media box",
+        "description": "Pick the type of device you want to control.",
+        "data": {
+          "device_type": "Device type"
+        }
+      },
+      "lg_webos": {
+        "title": "LG WebOS TV",
+        "description": "Enter the IP/hostname of the TV. MAC is optional but required to turn the TV on when it's fully off (Wake-on-LAN).",
+        "data": {
+          "name": "Name",
+          "host": "Host / IP",
+          "mac": "MAC address (optional)"
+        }
+      },
+      "pair": {
+        "title": "Pairing with TV",
+        "description": "Look at the TV at {host} and accept the pairing prompt. Then press SUBMIT here."
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the device.",
+      "pair_refused": "The TV refused pairing. Accept the prompt on the TV and try again.",
+      "no_client_key": "Pairing succeeded but no client key was returned."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "device_type_not_implemented": "This device type isn't implemented yet."
+    }
+  }
+}

@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Sync manifest.json version with git tag
+        run: |
+          python3 - <<'PY'
+          import json, os
+          path = "custom_components/universal_remote/manifest.json"
+          with open(path) as f:
+              manifest = json.load(f)
+          manifest["version"] = os.environ["VERSION"]
+          with open(path, "w") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          PY
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Create zip
+        run: |
+          cd custom_components/universal_remote
+          zip -r ../../universal_remote.zip .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: universal_remote.zip
+          generate_release_notes: true
