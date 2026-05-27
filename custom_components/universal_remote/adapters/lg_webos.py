@@ -109,7 +109,7 @@ class LGWebOSAdapter(RemoteAdapter):
 
     async def connect(self) -> None:
         async with self._connect_lock:
-            if self._client and self._client.is_connected():
+            if self._client and self._is_connected_safe():
                 return
 
             self._client = WebOsClient(self._host, self._client_key)
@@ -119,6 +119,7 @@ class LGWebOSAdapter(RemoteAdapter):
             try:
                 await self._client.connect()
             except WebOsTvPairError as err:
+                self._client = None
                 raise AdapterAuthError(
                     "TV refused pairing — accept the prompt on the TV and retry"
                 ) from err
@@ -128,6 +129,9 @@ class LGWebOSAdapter(RemoteAdapter):
                 # aiohttp.WSMessageTypeError (TV in standby refusing handshake with code 1008),
                 # and others. Catch broadly so we can always degrade to ConfigEntryNotReady
                 # and let HA retry instead of failing setup permanently.
+                # Clear the client so we don't leave a corrupt instance around — calling
+                # is_connected() on it later can re-raise the same exception.
+                self._client = None
                 raise AdapterConnectionError(
                     f"Unable to connect to TV: {type(err).__name__}: {err}"
                 ) from err
@@ -216,9 +220,7 @@ class LGWebOSAdapter(RemoteAdapter):
             # so toggle means turn off.
             try:
                 await self._ensure_connected()
-                has_live_connection = (
-                    self._client is not None and self._client.is_connected()
-                )
+                has_live_connection = self._is_connected_safe()
             except AdapterConnectionError:
                 has_live_connection = False
 
@@ -267,7 +269,7 @@ class LGWebOSAdapter(RemoteAdapter):
         """
         _LOGGER.debug("turn_on: mac=%s client_connected=%s",
                       bool(self._mac),
-                      self._client.is_connected() if self._client else False)
+                      self._is_connected_safe())
 
         if self._mac:
             if self._service_caller is None:
@@ -300,7 +302,7 @@ class LGWebOSAdapter(RemoteAdapter):
                     f"Wake-on-LAN call failed: {err}"
                 ) from err
 
-        if self._client and self._client.is_connected():
+        if self._client and self._is_connected_safe():
             try:
                 _LOGGER.debug("Sending power_on via websocket")
                 await self._client.power_on()
@@ -391,8 +393,22 @@ class LGWebOSAdapter(RemoteAdapter):
 
     # ----- Helpers -----
 
+    def _is_connected_safe(self) -> bool:
+        """Return whether we have a live websocket, never raising.
+
+        aiowebostv's is_connected() can occasionally re-raise the last
+        WebSocket error (e.g. WSMessageTypeError 1008) instead of returning
+        False. Wrap defensively so we always get a clean bool.
+        """
+        if self._client is None:
+            return False
+        try:
+            return bool(self._client.is_connected())
+        except Exception:  # noqa: BLE001
+            return False
+
     async def _ensure_connected(self) -> None:
-        if not self._client or not self._client.is_connected():
+        if not self._client or not self._is_connected_safe():
             await self.connect()
 
     async def _safe_send(self, action) -> None:
