@@ -205,14 +205,17 @@ class LGWebOSAdapter(RemoteAdapter):
     async def press_button(self, button: str) -> None:
         # Power buttons short-circuit
         if button == Button.POWER:
-            # Treat the TV as ON only if we have a live websocket AND a positive
-            # state reading. Any other case (websocket down, state never reported,
-            # last reading was "off") is treated as OFF so the toggle does the
-            # right thing — turn it on.
             tv_definitely_on = (
                 self._client is not None
                 and self._client.is_connected()
                 and self._state.powered_on is True
+            )
+            _LOGGER.debug(
+                "POWER toggle: client=%s connected=%s powered_on=%s -> %s",
+                self._client is not None,
+                self._client.is_connected() if self._client else None,
+                self._state.powered_on,
+                "turn_off" if tv_definitely_on else "turn_on",
             )
             if tv_definitely_on:
                 await self.turn_off()
@@ -220,9 +223,11 @@ class LGWebOSAdapter(RemoteAdapter):
                 await self.turn_on()
             return
         if button == Button.POWER_ON:
+            _LOGGER.debug("POWER_ON pressed")
             await self.turn_on()
             return
         if button == Button.POWER_OFF:
+            _LOGGER.debug("POWER_OFF pressed")
             await self.turn_off()
             return
 
@@ -250,25 +255,35 @@ class LGWebOSAdapter(RemoteAdapter):
            enabled support this.
         3. Otherwise, give a clear error.
         """
+        _LOGGER.debug("turn_on: mac=%s client_connected=%s",
+                      bool(self._mac),
+                      self._client.is_connected() if self._client else False)
+
         if self._mac:
             if self._service_caller is None:
                 raise AdapterConnectionError(
                     "No service caller available — adapter was built standalone"
                 )
             try:
-                # Two packets, small delay between — this is what the LG community
-                # and the home-assistant webostv integration both do.
+                _LOGGER.debug("Sending WoL magic packet #1 to %s", self._mac)
                 await self._service_caller(
                     "wake_on_lan",
                     "send_magic_packet",
                     {"mac": self._mac},
                 )
                 await asyncio.sleep(0.25)
+                _LOGGER.debug("Sending WoL magic packet #2 to %s", self._mac)
                 await self._service_caller(
                     "wake_on_lan",
                     "send_magic_packet",
                     {"mac": self._mac},
                 )
+                _LOGGER.info("WoL packets sent to %s", self._mac)
+                # Optimistically mark TV as on so the next POWER toggle has a
+                # chance to take effect. The next state callback will correct
+                # this if we were wrong.
+                self._state.powered_on = True
+                self._notify()
                 return
             except Exception as err:  # noqa: BLE001
                 raise AdapterConnectionError(
@@ -277,7 +292,10 @@ class LGWebOSAdapter(RemoteAdapter):
 
         if self._client and self._client.is_connected():
             try:
+                _LOGGER.debug("Sending power_on via websocket")
                 await self._client.power_on()
+                self._state.powered_on = True
+                self._notify()
                 return
             except Exception as err:  # noqa: BLE001
                 raise AdapterConnectionError(
@@ -289,7 +307,47 @@ class LGWebOSAdapter(RemoteAdapter):
         )
 
     async def turn_off(self) -> None:
-        await self._safe_send(lambda c: c.power_off())
+        """Tell the TV to power off.
+
+        Unlike other commands, power_off is a *terminal* operation — the TV
+        will close the websocket as it shuts down. Any exception raised while
+        the connection drops is expected, NOT an error. We do NOT use
+        _safe_send here because retry would either fail (TV now off) or send
+        the command twice (unnecessary).
+        """
+        _LOGGER.debug("turn_off: ensuring connection then sending power_off")
+        try:
+            await self._ensure_connected()
+        except AdapterConnectionError as err:
+            # TV already unreachable — assume already off.
+            _LOGGER.debug("turn_off: TV unreachable, treating as already off: %s", err)
+            self._state.powered_on = False
+            self._state.available = False
+            self._notify()
+            return
+
+        try:
+            await self._client.power_off()  # type: ignore[union-attr]
+            _LOGGER.debug("turn_off: power_off sent successfully")
+        except Exception as err:  # noqa: BLE001
+            # Expected when the TV closes the socket mid-send. The TV WILL turn
+            # off — the command got through before the socket died.
+            _LOGGER.debug(
+                "turn_off: exception after power_off (expected during shutdown): %s: %s",
+                type(err).__name__, err,
+            )
+
+        # Optimistically mark TV as off and tear down the dead socket so the
+        # next command starts clean.
+        self._state.powered_on = False
+        self._state.available = False
+        self._notify()
+        try:
+            if self._client:
+                await self._client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        self._client = None
 
     async def volume_up(self) -> None:
         await self._safe_send(lambda c: c.volume_up())
