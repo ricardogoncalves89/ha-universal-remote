@@ -20,6 +20,16 @@ from .const import CONF_DEVICE_TYPE, DOMAIN, RECONNECT_INTERVAL_SECONDS
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _handle_options_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the entry when its options change.
+
+    Triggered by entry.add_update_listener. The simplest way to apply new
+    options (e.g. an updated source filter) is to fully reload the entry —
+    that rebuilds the adapter with the new merged config.
+    """
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
     """One coordinator per configured device.
 
@@ -42,13 +52,20 @@ class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
             """
             await hass.services.async_call(domain, service, data, blocking=True)
 
+        # Merge entry.data with entry.options so the adapter sees both.
+        # data holds connection details (host, mac, client_key, device_type).
+        # options holds user-editable preferences (allowed_sources, etc.).
+        adapter_config = {**entry.data, **entry.options}
+
         self.adapter: RemoteAdapter = build_adapter(
             entry.data[CONF_DEVICE_TYPE],
-            dict(entry.data),
+            adapter_config,
             service_caller=_call_service,
         )
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_adapter: callable | None = None
+        # Re-run setup when the user changes options (e.g. filtered sources).
+        self._unsub_options_listener = entry.add_update_listener(_handle_options_update)
 
     async def async_setup(self) -> None:
         """Initial connect + register push listener.
@@ -87,6 +104,8 @@ class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
             self._reconnect_task.cancel()
         if self._unsub_adapter:
             self._unsub_adapter()
+        if self._unsub_options_listener:
+            self._unsub_options_listener()
         await self.adapter.disconnect()
 
     @callback

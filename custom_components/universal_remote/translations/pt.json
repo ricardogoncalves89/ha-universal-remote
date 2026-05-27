@@ -32,5 +32,16 @@
       "device_type_not_implemented": "Este tipo de dispositivo ainda não está implementado.",
       "reconfigure_successful": "Definições atualizadas e integração recarregada."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Preferências de fontes",
+        "description": "Escolhe quais as fontes (HDMI e apps) que aparecem no seletor do media_player. Deixa vazio para mostrar todas. {note}",
+        "data": {
+          "allowed_sources": "Fontes a mostrar"
+        }
+      }
+    }
   }
 }

@@ -32,5 +32,16 @@
       "device_type_not_implemented": "This device type isn't implemented yet.",
       "reconfigure_successful": "Settings updated and integration reloaded."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Source preferences",
+        "description": "Pick which sources (HDMI inputs and apps) appear in the media_player picker. Leave empty to show all of them. {note}",
+        "data": {
+          "allowed_sources": "Sources to show"
+        }
+      }
+    }
   }
 }

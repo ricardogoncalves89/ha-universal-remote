@@ -35,6 +35,11 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._user_input: dict[str, Any] = {}
         self._reconfigure_entry: ConfigEntry | None = None
 
+    @staticmethod
+    def async_get_options_flow(entry: ConfigEntry) -> config_entries.OptionsFlow:
+        """Return the options flow for an existing entry."""
+        return UniversalRemoteOptionsFlow(entry)
+
     # ----- Add new device -----
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -177,3 +182,80 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.hass.config_entries.async_reload(self._reconfigure_entry.entry_id)
         )
         return self.async_abort(reason="reconfigure_successful")
+
+
+class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
+    """Options flow — lets the user pick which sources show in the picker.
+
+    The full list of sources is read from the running coordinator's adapter
+    (which knows what the TV reported via its state callbacks). The user
+    selects a subset; if nothing is selected we treat that as "show all"
+    so first-time users see everything.
+    """
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        self._entry = entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        from .const import DOMAIN  # local import to avoid circulars at top
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        # Available sources come from the adapter's current source_map.
+        available: list[str] = []
+        if coordinator is not None:
+            available = sorted(getattr(coordinator.adapter, "_source_map", {}).keys())
+
+        if user_input is not None:
+            # Empty list means "no filter — show everything".
+            selected = user_input.get("allowed_sources", [])
+            return self.async_create_entry(
+                title="",
+                data={"allowed_sources": selected},
+            )
+
+        current = self._entry.options.get("allowed_sources", [])
+        # Make sure currently saved options are still selectable even if the
+        # adapter's list happens to be empty right now (TV off, etc.).
+        choices = sorted(set(available) | set(current))
+
+        if not choices:
+            # Nothing to pick — explain to the user.
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema({
+                    vol.Optional("allowed_sources", default=[]): list,
+                }),
+                description_placeholders={
+                    "note": "No sources are currently visible. Turn the TV on so it can report its inputs and apps, then come back."
+                },
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    "allowed_sources",
+                    default=current,
+                ): vol.All(
+                    cv_multi_select(choices),
+                ),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
+def cv_multi_select(options: list[str]):
+    """Tiny voluptuous helper for a multi-select dropdown.
+
+    We import lazily because homeassistant.helpers.selector requires
+    HA at import time and we want config_flow to remain importable in tests.
+    """
+    from homeassistant.helpers import selector
+
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=options,
+            multiple=True,
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )

@@ -104,6 +104,10 @@ class LGWebOSAdapter(RemoteAdapter):
         self._mac: str | None = config.get(CONF_MAC)
         self._client: WebOsClient | None = None
         self._connect_lock = asyncio.Lock()
+        # Internal map: source label -> (kind, identifier).
+        # kind is "app" or "input"; identifier is the webOS-internal ID.
+        # Built on every state update by _on_tv_state.
+        self._source_map: dict[str, tuple[str, str]] = {}
 
     # ----- Lifecycle -----
 
@@ -166,11 +170,15 @@ class LGWebOSAdapter(RemoteAdapter):
         """Translate the aiowebostv WebOsTvState into our normalised DeviceState.
 
         We infer powered_on from multiple signals because the LG webOS API
-        is famously inconsistent across models:
-          - power_state.state == "Power Off" → off
-          - power_state.state in ("Active", "Active Standby") → on
-          - current_app_id present → on (app running implies powered)
-          - otherwise unknown → leave as last value
+        is famously inconsistent across models.
+
+        For sources, we combine:
+          - tv_state.inputs   → HDMI ports, Live TV, etc.
+          - tv_state.apps     → Netflix, Disney+, YouTube, etc.
+        Both must be selectable from the media_player UI, so we merge them
+        into a single source_list while keeping an internal map to translate
+        a user-facing label back to its webOS-internal id (and type) when
+        select_source is called.
         """
         s = self._state
         s.available = True
@@ -182,9 +190,7 @@ class LGWebOSAdapter(RemoteAdapter):
             if state_str == "Power Off":
                 s.powered_on = False
             elif state_str in ("Active", "Active Standby", "Screen Off"):
-                # "Screen Off" still counts as on for our purposes — TV is responsive.
                 s.powered_on = True
-            # else: leave whatever we had
 
         app_id = getattr(tv_state, "current_app_id", None)
         if app_id:
@@ -195,12 +201,53 @@ class LGWebOSAdapter(RemoteAdapter):
         vol = getattr(tv_state, "volume", None)
         s.volume_level = (vol / 100.0) if isinstance(vol, (int, float)) and vol >= 0 else None
 
+        # ----- Build source map (label -> (kind, id)) and source list -----
+        source_map: dict[str, tuple[str, str]] = {}
+
         inputs = getattr(tv_state, "inputs", None) or {}
-        s.source_list = sorted([i.get("label", i.get("id", "")) for i in inputs.values()
-                                if isinstance(i, dict)])
+        for inp in inputs.values():
+            if not isinstance(inp, dict):
+                continue
+            label = inp.get("label") or inp.get("id")
+            inp_id = inp.get("id")
+            if label and inp_id:
+                source_map[label] = ("input", inp_id)
+
+        apps = getattr(tv_state, "apps", None) or {}
+        for app in apps.values():
+            if not isinstance(app, dict):
+                continue
+            # Skip system apps users don't want to launch directly
+            if app.get("systemApp") is True:
+                continue
+            label = app.get("title") or app.get("id")
+            app_id_val = app.get("id")
+            if label and app_id_val and label not in source_map:
+                # Don't overwrite inputs if an app happens to share a label
+                source_map[label] = ("app", app_id_val)
+
+        # Apply user filter from config_entry options, if any.
+        # Stored as a list of allowed labels under the "sources" key.
+        allowed = self._config.get("allowed_sources")
+        if isinstance(allowed, list) and allowed:
+            source_map = {k: v for k, v in source_map.items() if k in allowed}
+
+        self._source_map = source_map
+        s.source_list = sorted(source_map.keys())
+
+        # Determine current source label from current_app_id
+        if app_id:
+            for label, (kind, ident) in source_map.items():
+                if kind == "app" and ident == app_id:
+                    s.current_source = label
+                    break
+
+        # Also honour explicit current_input for HDMI etc.
         current_input = getattr(tv_state, "current_input", None)
         if isinstance(current_input, dict):
-            s.current_source = current_input.get("label") or current_input.get("id")
+            label = current_input.get("label") or current_input.get("id")
+            if label:
+                s.current_source = label
 
         self._notify()
 
@@ -374,12 +421,47 @@ class LGWebOSAdapter(RemoteAdapter):
         await self._safe_send(lambda c: c.set_mute(muted))
 
     async def select_source(self, source: str) -> None:
-        # The label-vs-id distinction trips people up — try label first, then id.
+        """Select a source by user-facing label.
+
+        Looks up the label in the source map built by _on_tv_state, then calls
+        the right webOS method based on the kind:
+          - "app"   → launch_app(app_id)  (or launch_app_with_params if older lib)
+          - "input" → set_input(input_id)
+
+        If the label isn't found (state hasn't pushed yet, or stale config),
+        we fall back to trying both endpoints with the raw string.
+        """
+        mapping = self._source_map.get(source)
+
+        async def _launch_app(c: WebOsClient, app_id: str) -> None:
+            # aiowebostv 0.7+ has launch_app(id); older versions only had
+            # launch_app_with_params(id, params). Try the newer one first.
+            launch_fn = getattr(c, "launch_app", None)
+            if launch_fn is not None:
+                await launch_fn(app_id)
+            else:
+                await c.launch_app_with_params(app_id, {})
+
         async def _run(c: WebOsClient) -> None:
+            if mapping is not None:
+                kind, ident = mapping
+                if kind == "app":
+                    _LOGGER.debug("select_source: launching app id=%s", ident)
+                    await _launch_app(c, ident)
+                else:
+                    _LOGGER.debug("select_source: setting input id=%s", ident)
+                    await c.set_input(ident)
+                return
+
+            _LOGGER.debug(
+                "select_source: %r not in source_map (%d entries); falling back",
+                source, len(self._source_map),
+            )
             try:
-                await c.launch_app_with_params(source, {})
+                await _launch_app(c, source)
             except WebOsTvCommandError:
                 await c.set_input(source)
+
         await self._safe_send(_run)
 
     async def play(self) -> None:
