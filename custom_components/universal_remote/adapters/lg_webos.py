@@ -205,19 +205,29 @@ class LGWebOSAdapter(RemoteAdapter):
     async def press_button(self, button: str) -> None:
         # Power buttons short-circuit
         if button == Button.POWER:
-            tv_definitely_on = (
-                self._client is not None
-                and self._client.is_connected()
-                and self._state.powered_on is True
-            )
+            # The single source of truth is the websocket: if we have a live
+            # connection, the TV is reachable (=on); if not, it's off or
+            # unreachable (=needs WoL). We DON'T trust self._state.powered_on
+            # alone because the state callback can lag the actual TV state by
+            # tens of seconds in some scenarios (e.g. TV woken via remote).
+            #
+            # Try a probe connection first to handle the "user turned TV on
+            # via physical remote" case. If we can connect, the TV is on,
+            # so toggle means turn off.
+            try:
+                await self._ensure_connected()
+                has_live_connection = (
+                    self._client is not None and self._client.is_connected()
+                )
+            except AdapterConnectionError:
+                has_live_connection = False
+
             _LOGGER.debug(
-                "POWER toggle: client=%s connected=%s powered_on=%s -> %s",
-                self._client is not None,
-                self._client.is_connected() if self._client else None,
-                self._state.powered_on,
-                "turn_off" if tv_definitely_on else "turn_on",
+                "POWER toggle: probe result has_live_connection=%s -> %s",
+                has_live_connection,
+                "turn_off" if has_live_connection else "turn_on",
             )
-            if tv_definitely_on:
+            if has_live_connection:
                 await self.turn_off()
             else:
                 await self.turn_on()
