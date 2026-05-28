@@ -84,6 +84,26 @@ _MEDIA_COMMAND_MAP: dict[str, str] = {
 }
 
 
+# webOS system app IDs that we still want to expose as selectable sources.
+# Most system apps (settings, app store, accessibility, screen-share helpers,
+# etc.) are noise and not something the user wants to "switch to" via the
+# media player picker. But a handful of them ARE real content sources and
+# should appear in the source list.
+#
+# Add new IDs here as you encounter them. The IDs below are the stable
+# webOS-internal app identifiers, not their localised display names.
+_USEFUL_SYSTEM_APPS: set[str] = {
+    "com.webos.app.livetv",         # Live TV (DVB-T/cable/satellite tuner)
+    "com.webos.app.hdmi1",          # HDMI inputs sometimes show up as apps
+    "com.webos.app.hdmi2",
+    "com.webos.app.hdmi3",
+    "com.webos.app.hdmi4",
+    "com.webos.app.externalinput.av1",
+    "com.webos.app.externalinput.component",
+    "com.webos.app.externalinput.scart",
+}
+
+
 class LGWebOSAdapter(RemoteAdapter):
     """Adapter for LG WebOS TVs over the websocket pylgtv protocol."""
 
@@ -231,11 +251,14 @@ class LGWebOSAdapter(RemoteAdapter):
         for app in apps.values():
             if not isinstance(app, dict):
                 continue
-            # Skip system apps users don't want to launch directly
-            if app.get("systemApp") is True:
-                continue
-            label = app.get("title") or app.get("id")
             app_id_val = app.get("id")
+            # System apps are usually noise (settings, accessibility,
+            # screen-share helpers, etc.) so we skip them — EXCEPT for the
+            # handful of curated IDs we know users want to switch to,
+            # most importantly Live TV.
+            if app.get("systemApp") is True and app_id_val not in _USEFUL_SYSTEM_APPS:
+                continue
+            label = app.get("title") or app_id_val
             if label and app_id_val and label not in source_map:
                 # Don't overwrite inputs if an app happens to share a label
                 source_map[label] = ("app", app_id_val)
