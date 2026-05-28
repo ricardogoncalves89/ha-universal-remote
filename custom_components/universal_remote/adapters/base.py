@@ -33,6 +33,11 @@ StateCallback = Callable[[DeviceState], None]
 # Signature: async (domain, service, service_data) -> None
 ServiceCaller = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 
+# Optional callback so the adapter can persist its known sources outside of
+# its own lifecycle. Called whenever the adapter's understanding of the
+# device's full source list changes. Signature: sync (sources: list[str]) -> None
+SourceMapPersister = Callable[[list[str]], None]
+
 
 class AdapterError(Exception):
     """Generic adapter error."""

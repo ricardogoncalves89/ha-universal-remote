@@ -19,14 +19,28 @@ from .const import CONF_DEVICE_TYPE, DOMAIN, RECONNECT_INTERVAL_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
+# Key names that, when changed in entry.options, should NOT trigger an
+# entry reload. These are written by the integration itself (e.g. caching
+# the known sources discovered from the device) rather than by the user.
+# Reloading on these would create an infinite update loop.
+_INTERNAL_OPTION_KEYS = frozenset({"known_sources"})
+
 
 async def _handle_options_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry when its options change.
+    """Reload the entry when the user changes options.
 
-    Triggered by entry.add_update_listener. The simplest way to apply new
-    options (e.g. an updated source filter) is to fully reload the entry —
-    that rebuilds the adapter with the new merged config.
+    Triggered by entry.add_update_listener. We compare against a snapshot
+    of the previously-seen user-facing options to avoid reloading on
+    internal writes (e.g. when the adapter persists its known source list).
     """
+    user_facing = {k: v for k, v in entry.options.items()
+                   if k not in _INTERNAL_OPTION_KEYS}
+    runtime = hass.data.setdefault("_universal_remote_runtime", {})
+    last_seen = runtime.get(entry.entry_id)
+    if last_seen == user_facing:
+        _LOGGER.debug("Options changed but only internal keys — skipping reload")
+        return
+    runtime[entry.entry_id] = user_facing
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -62,8 +76,34 @@ class UniversalRemoteCoordinator(DataUpdateCoordinator[DeviceState]):
             adapter_config,
             service_caller=_call_service,
         )
+
+        # Give the adapter a way to persist its discovered sources back into
+        # the config entry. Whenever the TV reports a new set of inputs+apps,
+        # we save them so the options flow can show the full list even
+        # immediately after a reload (before the state callback fires again).
+        def _persist_sources(sources: list[str]) -> None:
+            current = entry.options.get("known_sources", [])
+            if list(current) == list(sources):
+                return  # no change, avoid writing
+            new_options = {**entry.options, "known_sources": sources}
+            hass.config_entries.async_update_entry(entry, options=new_options)
+
+        # Set the attribute directly — only some adapters support this.
+        if hasattr(self.adapter, "on_source_map_changed"):
+            self.adapter.on_source_map_changed = _persist_sources
+
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_adapter: callable | None = None
+
+        # Seed the runtime snapshot for the options-change diff so the first
+        # legitimate user change is correctly detected as different from the
+        # initial state.
+        runtime = hass.data.setdefault("_universal_remote_runtime", {})
+        runtime[entry.entry_id] = {
+            k: v for k, v in entry.options.items()
+            if k not in _INTERNAL_OPTION_KEYS
+        }
+
         # Re-run setup when the user changes options (e.g. filtered sources).
         self._unsub_options_listener = entry.add_update_listener(_handle_options_update)
 

@@ -201,26 +201,39 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         from .const import DOMAIN  # local import to avoid circulars at top
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
-        # Available sources come from the adapter's current source_map.
-        available: list[str] = []
+        # Three sources of "what the TV can offer", in priority order:
+        # 1. Live source_map from the adapter (freshest, may be empty if the
+        #    adapter just restarted and the state callback hasn't fired yet).
+        # 2. known_sources persisted in entry.options (saved by the coordinator
+        #    when the adapter last reported a different set). Survives reloads.
+        # 3. The user's currently-saved allow-list (ensures saved choices are
+        #    always shown as already-selected, even if the TV is off).
+        live: list[str] = []
         if coordinator is not None:
-            available = sorted(getattr(coordinator.adapter, "_source_map", {}).keys())
+            live = sorted(getattr(coordinator.adapter, "_source_map", {}).keys())
+
+        persisted = self._entry.options.get("known_sources", [])
+        if not isinstance(persisted, list):
+            persisted = []
 
         if user_input is not None:
-            # Empty list means "no filter — show everything".
             selected = user_input.get("allowed_sources", [])
-            return self.async_create_entry(
-                title="",
-                data={"allowed_sources": selected},
-            )
+            # Preserve known_sources — we don't want to drop the cached list
+            # by writing only allowed_sources here.
+            new_options = {
+                **self._entry.options,
+                "allowed_sources": selected,
+            }
+            return self.async_create_entry(title="", data=new_options)
 
         current = self._entry.options.get("allowed_sources", [])
-        # Make sure currently saved options are still selectable even if the
-        # adapter's list happens to be empty right now (TV off, etc.).
-        choices = sorted(set(available) | set(current))
+        # Union of all three so:
+        #   - everything the TV currently reports is selectable,
+        #   - sources reported in past sessions stay selectable across reloads,
+        #   - the user's saved selection is always visible (and pre-checked).
+        choices = sorted(set(live) | set(persisted) | set(current))
 
         if not choices:
-            # Nothing to pick — explain to the user.
             return self.async_show_form(
                 step_id="init",
                 data_schema=vol.Schema({

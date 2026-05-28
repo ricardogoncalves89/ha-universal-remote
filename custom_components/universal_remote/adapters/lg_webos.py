@@ -108,6 +108,20 @@ class LGWebOSAdapter(RemoteAdapter):
         # kind is "app" or "input"; identifier is the webOS-internal ID.
         # Built on every state update by _on_tv_state.
         self._source_map: dict[str, tuple[str, str]] = {}
+        # Optional persister, set by the coordinator after construction.
+        # Called whenever the source map changes so the coordinator can store
+        # the known sources in entry.options for future reloads.
+        self.on_source_map_changed = None  # type: ignore[assignment]
+
+        # Seed the map from any persisted known_sources so the options flow
+        # always has something to show, even on first state-update-pending.
+        seed = config.get("known_sources")
+        if isinstance(seed, list):
+            # We don't know kinds/ids until the TV reports — store as input
+            # placeholders. They'll be overwritten on first state callback.
+            for label in seed:
+                if isinstance(label, str):
+                    self._source_map[label] = ("placeholder", "")
 
     # ----- Lifecycle -----
 
@@ -226,16 +240,33 @@ class LGWebOSAdapter(RemoteAdapter):
                 # Don't overwrite inputs if an app happens to share a label
                 source_map[label] = ("app", app_id_val)
 
-        # Apply user filter from config_entry options, if any.
-        # Stored as a list of allowed labels under the "sources" key.
+        # _source_map keeps the FULL truth from the TV (every input + every
+        # app). It must NOT be filtered — the options flow reads this to let
+        # the user pick which subset to expose.
+        previous_keys = set(self._source_map.keys())
+        self._source_map = source_map
+        new_keys = set(source_map.keys())
+        # If the source set changed, notify the persister so the coordinator
+        # can write it back to the config entry. Cheap protection against
+        # re-writing the same thing every callback (the TV sends updates often).
+        if new_keys != previous_keys and self.on_source_map_changed is not None:
+            try:
+                self.on_source_map_changed(sorted(new_keys))
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Source map persister raised; ignoring", exc_info=True)
+
+        # The visible source_list is filtered by the user's allow-list.
+        # Empty/missing allow-list => show everything (first-time UX).
         allowed = self._config.get("allowed_sources")
         if isinstance(allowed, list) and allowed:
-            source_map = {k: v for k, v in source_map.items() if k in allowed}
+            visible = {k: v for k, v in source_map.items() if k in allowed}
+        else:
+            visible = source_map
+        s.source_list = sorted(visible.keys())
 
-        self._source_map = source_map
-        s.source_list = sorted(source_map.keys())
-
-        # Determine current source label from current_app_id
+        # Determine current source label from current_app_id. Use the full
+        # source_map (not the filter) — we want to report the truth even if
+        # the user filtered that app out of the picker.
         if app_id:
             for label, (kind, ident) in source_map.items():
                 if kind == "app" and ident == app_id:
