@@ -20,17 +20,39 @@
       "pair": {
         "title": "Pairing with TV",
         "description": "Look at the TV at {host} and accept the pairing prompt. Then press SUBMIT here."
+      },
+      "apple_tv_scan": {
+        "title": "Discover Apple TV",
+        "description": "Pick the Apple TV you want to add.",
+        "data": {
+          "device": "Apple TV"
+        }
+      },
+      "apple_tv_pair_companion": {
+        "title": "Pair Companion protocol",
+        "description": "A 4-digit PIN should be showing on the screen of {device}. Enter it here to pair the Companion protocol (used for remote control and power).",
+        "data": {
+          "pin": "PIN shown on the Apple TV"
+        }
+      },
+      "apple_tv_pair_airplay": {
+        "title": "Pair AirPlay protocol",
+        "description": "A second 4-digit PIN should be showing on {device}. Enter it here to pair the AirPlay protocol (used for volume and metadata).",
+        "data": {
+          "pin": "PIN shown on the Apple TV"
+        }
       }
     },
     "error": {
       "cannot_connect": "Cannot reach the device.",
-      "pair_refused": "The TV refused pairing. Accept the prompt on the TV and try again.",
+      "pair_refused": "Pairing was refused. Try again with the new PIN shown on screen.",
       "no_client_key": "Pairing succeeded but no client key was returned."
     },
     "abort": {
       "already_configured": "This device is already configured.",
       "device_type_not_implemented": "This device type isn't implemented yet.",
-      "reconfigure_successful": "Settings updated and integration reloaded."
+      "reconfigure_successful": "Settings updated and integration reloaded.",
+      "no_devices_found": "No Apple TVs were found on the network."
     }
   },
   "options": {

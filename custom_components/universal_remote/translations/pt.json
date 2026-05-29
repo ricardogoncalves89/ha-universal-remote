@@ -20,17 +20,39 @@
       "pair": {
         "title": "Emparelhamento com a TV",
         "description": "Olha para a TV em {host} e aceita o pedido de emparelhamento. Depois carrega em SUBMETER aqui."
+      },
+      "apple_tv_scan": {
+        "title": "Descobrir Apple TV",
+        "description": "Escolhe a Apple TV que queres adicionar.",
+        "data": {
+          "device": "Apple TV"
+        }
+      },
+      "apple_tv_pair_companion": {
+        "title": "Emparelhar protocolo Companion",
+        "description": "Um PIN de 4 dígitos deve estar a aparecer no ecrã da {device}. Introduz aqui para emparelhar o protocolo Companion (usado para controlo remoto e energia).",
+        "data": {
+          "pin": "PIN mostrado na Apple TV"
+        }
+      },
+      "apple_tv_pair_airplay": {
+        "title": "Emparelhar protocolo AirPlay",
+        "description": "Um segundo PIN de 4 dígitos deve estar a aparecer na {device}. Introduz aqui para emparelhar o AirPlay (usado para volume e metadados).",
+        "data": {
+          "pin": "PIN mostrado na Apple TV"
+        }
       }
     },
     "error": {
       "cannot_connect": "Não consegui contactar o dispositivo.",
-      "pair_refused": "A TV recusou o emparelhamento. Aceita o pedido na TV e tenta novamente.",
+      "pair_refused": "O emparelhamento foi recusado. Tenta de novo com o novo PIN que aparece no ecrã.",
       "no_client_key": "Emparelhamento bem sucedido mas não foi devolvida uma chave."
     },
     "abort": {
       "already_configured": "Este dispositivo já está configurado.",
       "device_type_not_implemented": "Este tipo de dispositivo ainda não está implementado.",
-      "reconfigure_successful": "Definições atualizadas e integração recarregada."
+      "reconfigure_successful": "Definições atualizadas e integração recarregada.",
+      "no_devices_found": "Não foram encontradas Apple TVs na rede."
     }
   },
   "options": {

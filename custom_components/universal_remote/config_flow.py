@@ -16,6 +16,7 @@ from .adapters.base import AdapterAuthError, AdapterConnectionError
 from .const import (
     CONF_CLIENT_KEY,
     CONF_DEVICE_TYPE,
+    DEVICE_TYPE_APPLE_TV,
     DEVICE_TYPE_LABELS,
     DEVICE_TYPE_LG_WEBOS,
     DEVICE_TYPES,
@@ -34,6 +35,11 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_type: str | None = None
         self._user_input: dict[str, Any] = {}
         self._reconfigure_entry: ConfigEntry | None = None
+        # Apple TV flow state
+        self._atv_devices: list[Any] = []  # pyatv scan results
+        self._atv_chosen: Any = None
+        self._atv_pairing_companion: Any = None
+        self._atv_pairing_airplay: Any = None
 
     @staticmethod
     def async_get_options_flow(entry: ConfigEntry) -> config_entries.OptionsFlow:
@@ -48,6 +54,8 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._device_type = user_input[CONF_DEVICE_TYPE]
             if self._device_type == DEVICE_TYPE_LG_WEBOS:
                 return await self.async_step_lg_webos()
+            if self._device_type == DEVICE_TYPE_APPLE_TV:
+                return await self.async_step_apple_tv_scan()
             return self.async_abort(reason="device_type_not_implemented")
 
         schema = vol.Schema(
@@ -146,6 +154,172 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({}),
             errors=errors,
             description_placeholders={"host": self._user_input[CONF_HOST]},
+        )
+
+    # ----- Apple TV: scan -> pick -> pair Companion -> pair AirPlay -> done -----
+
+    async def async_step_apple_tv_scan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Scan the network for Apple TVs and let the user pick one."""
+        import pyatv  # local import: optional dep loaded at request time
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            chosen_id = user_input["device"]
+            chosen = next(
+                (a for a in self._atv_devices
+                 if str(a.identifier) == chosen_id),
+                None,
+            )
+            if chosen is None:
+                errors["base"] = "cannot_connect"
+            else:
+                self._atv_chosen = chosen
+                await self.async_set_unique_id(f"apple_tv_{chosen_id}")
+                self._abort_if_unique_id_configured()
+                return await self.async_step_apple_tv_pair_companion()
+
+        try:
+            loop = self.hass.loop
+            self._atv_devices = await pyatv.scan(loop, timeout=5)
+        except Exception:  # noqa: BLE001
+            return self.async_show_form(
+                step_id="apple_tv_scan",
+                data_schema=vol.Schema({}),
+                errors={"base": "cannot_connect"},
+            )
+
+        if not self._atv_devices:
+            return self.async_abort(reason="no_devices_found")
+
+        choices = {
+            str(a.identifier): f"{a.name} ({a.address})"
+            for a in self._atv_devices
+            if a.identifier
+        }
+
+        schema = vol.Schema({vol.Required("device"): vol.In(choices)})
+        return self.async_show_form(
+            step_id="apple_tv_scan", data_schema=schema, errors=errors
+        )
+
+    async def async_step_apple_tv_pair_companion(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Start (or finish) the Companion-protocol pairing.
+
+        On first entry we kick off pairing on the device — a PIN shows on the
+        TV. On submit we finalise with the PIN typed by the user.
+        """
+        import pyatv
+        from pyatv.const import Protocol
+
+        errors: dict[str, str] = {}
+
+        # Submission with PIN
+        if user_input is not None and self._atv_pairing_companion is not None:
+            pin = user_input.get("pin", "").strip()
+            try:
+                self._atv_pairing_companion.pin(int(pin))
+                await self._atv_pairing_companion.finish()
+            except Exception:  # noqa: BLE001
+                errors["base"] = "pair_refused"
+            else:
+                if self._atv_pairing_companion.has_paired:
+                    creds = self._atv_pairing_companion.service.credentials
+                    self._user_input["credentials_companion"] = creds
+                    try:
+                        await self._atv_pairing_companion.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._atv_pairing_companion = None
+                    return await self.async_step_apple_tv_pair_airplay()
+                errors["base"] = "pair_refused"
+
+        # First entry — initiate pairing
+        if self._atv_pairing_companion is None:
+            try:
+                self._atv_pairing_companion = await pyatv.pair(
+                    self._atv_chosen, Protocol.Companion, self.hass.loop
+                )
+                await self._atv_pairing_companion.begin()
+            except Exception:  # noqa: BLE001
+                return self.async_show_form(
+                    step_id="apple_tv_pair_companion",
+                    data_schema=vol.Schema({vol.Required("pin"): str}),
+                    errors={"base": "cannot_connect"},
+                )
+
+        return self.async_show_form(
+            step_id="apple_tv_pair_companion",
+            data_schema=vol.Schema({vol.Required("pin"): str}),
+            errors=errors,
+            description_placeholders={"device": self._atv_chosen.name},
+        )
+
+    async def async_step_apple_tv_pair_airplay(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Same idea as companion pairing but for AirPlay protocol."""
+        import pyatv
+        from pyatv.const import Protocol
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None and self._atv_pairing_airplay is not None:
+            pin = user_input.get("pin", "").strip()
+            try:
+                self._atv_pairing_airplay.pin(int(pin))
+                await self._atv_pairing_airplay.finish()
+            except Exception:  # noqa: BLE001
+                errors["base"] = "pair_refused"
+            else:
+                if self._atv_pairing_airplay.has_paired:
+                    creds = self._atv_pairing_airplay.service.credentials
+                    self._user_input["credentials_airplay"] = creds
+                    try:
+                        await self._atv_pairing_airplay.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._atv_pairing_airplay = None
+                    return await self._finalise_apple_tv()
+                errors["base"] = "pair_refused"
+
+        if self._atv_pairing_airplay is None:
+            try:
+                self._atv_pairing_airplay = await pyatv.pair(
+                    self._atv_chosen, Protocol.AirPlay, self.hass.loop
+                )
+                await self._atv_pairing_airplay.begin()
+            except Exception:  # noqa: BLE001
+                return self.async_show_form(
+                    step_id="apple_tv_pair_airplay",
+                    data_schema=vol.Schema({vol.Required("pin"): str}),
+                    errors={"base": "cannot_connect"},
+                )
+
+        return self.async_show_form(
+            step_id="apple_tv_pair_airplay",
+            data_schema=vol.Schema({vol.Required("pin"): str}),
+            errors=errors,
+            description_placeholders={"device": self._atv_chosen.name},
+        )
+
+    async def _finalise_apple_tv(self) -> FlowResult:
+        """Both pairings succeeded — write the config entry."""
+        entry_data = {
+            CONF_DEVICE_TYPE: DEVICE_TYPE_APPLE_TV,
+            "name": self._atv_chosen.name,
+            CONF_HOST: str(self._atv_chosen.address),
+            "atv_identifier": str(self._atv_chosen.identifier),
+            "credentials_companion": self._user_input.get("credentials_companion"),
+            "credentials_airplay": self._user_input.get("credentials_airplay"),
+        }
+        return self.async_create_entry(
+            title=self._atv_chosen.name,
+            data=entry_data,
         )
 
     # ----- Reconfigure existing device -----

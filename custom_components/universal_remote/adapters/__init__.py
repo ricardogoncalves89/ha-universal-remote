@@ -30,6 +30,8 @@ def build_adapter(
         raise NotImplementedError("Android TV adapter not implemented yet")
 
     if device_type == DEVICE_TYPE_APPLE_TV:
-        raise NotImplementedError("Apple TV adapter not implemented yet")
+        from .apple_tv import AppleTVAdapter
+
+        return AppleTVAdapter(config, service_caller)
 
     raise ValueError(f"Unknown device type: {device_type}")
