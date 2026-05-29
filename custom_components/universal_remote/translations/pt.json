@@ -59,7 +59,7 @@
     "step": {
       "init": {
         "title": "Preferências de fontes",
-        "description": "Escolhe quais as fontes (HDMI e apps) que aparecem no seletor do media_player. Deixa vazio para mostrar todas. {note}",
+        "description": "Escolhe quais as fontes (entradas e apps) que aparecem no seletor do media_player. Deixa vazio para mostrar todas.{note}",
         "data": {
           "allowed_sources": "Fontes a mostrar"
         }

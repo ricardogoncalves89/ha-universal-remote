@@ -1,7 +1,7 @@
 {
   "domain": "universal_remote",
   "name": "Universal Remote",
-  "version": "0.4.0",
+  "version": "0.4.3",
   "documentation": "https://github.com/ricardogoncalves89/ha-universal-remote",
   "issue_tracker": "https://github.com/ricardogoncalves89/ha-universal-remote/issues",
   "codeowners": ["@ricardogoncalves89"],

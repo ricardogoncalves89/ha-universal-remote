@@ -70,9 +70,9 @@ _BUTTON_MAP: dict[str, str] = {
     Button.PREVIOUS: "previous",
     Button.FAST_FORWARD: "skip_forward",
     Button.REWIND: "skip_backward",
-    Button.VOL_UP: "volume_up",
-    Button.VOL_DOWN: "volume_down",
-    # Note: Apple TV has no numeric keypad, no color buttons, no channel up/down,
+    # VOL_UP / VOL_DOWN / MUTE are NOT in this map — they go through the
+    # Audio facade in pyatv 0.16+, not RemoteControl. Handled below.
+    # Apple TV has no numeric keypad, no color buttons, no channel up/down,
     # no INPUT (it's the source itself). Those buttons are unsupported here.
 }
 
@@ -84,6 +84,9 @@ class AppleTVAdapter(RemoteAdapter):
         Button.POWER,
         Button.POWER_ON,
         Button.POWER_OFF,
+        Button.VOL_UP,
+        Button.VOL_DOWN,
+        Button.MUTE,
     }
 
     def __init__(
@@ -104,6 +107,10 @@ class AppleTVAdapter(RemoteAdapter):
         # Source map (label -> app_id) for select_source
         self._source_map: dict[str, str] = {}
         self.on_source_map_changed = None  # type: ignore[assignment]
+        # Last known volume level (0.0-100.0) we observed when not muted.
+        # Used to restore volume on un-mute. None means we never saw a volume
+        # reading yet (Apple TV in standby, no audio output, etc.).
+        self._last_known_volume: float | None = None
 
         # Seed source_map from persisted known_sources, if any (set by coordinator).
         seed = config.get("known_sources")
@@ -321,6 +328,23 @@ class AppleTVAdapter(RemoteAdapter):
         if button == Button.POWER_OFF:
             await self.turn_off()
             return
+        # Volume buttons go through the Audio facade, not RemoteControl.
+        if button == Button.VOL_UP:
+            await self.volume_up()
+            return
+        if button == Button.VOL_DOWN:
+            await self.volume_down()
+            return
+        if button == Button.MUTE:
+            # Toggle: if last-known volume is None or > 0, mute; else un-mute.
+            # We don't store an explicit "is_muted" flag because the Apple TV
+            # itself doesn't expose one — we only know "what is the volume now".
+            await self._ensure_connected()
+            audio = getattr(self._atv, "audio", None) if self._atv else None
+            current = getattr(audio, "volume", None) if audio else None
+            currently_muted = isinstance(current, (int, float)) and current <= 0.5
+            await self.mute(not currently_muted)
+            return
 
         method_name = _BUTTON_MAP.get(button)
         if method_name is None:
@@ -372,33 +396,94 @@ class AppleTVAdapter(RemoteAdapter):
             ) from err
 
     async def volume_up(self) -> None:
-        await self.press_button(Button.VOL_UP)
-
-    async def volume_down(self) -> None:
-        await self.press_button(Button.VOL_DOWN)
-
-    async def set_volume(self, level: float) -> None:
+        """Volume up via the Audio facade (pyatv 0.16+)."""
         await self._ensure_connected()
         audio = getattr(self._atv, "audio", None) if self._atv else None
         if audio is None:
             raise AdapterConnectionError(
-                "Audio facade not available — pair AirPlay protocol"
+                "Audio facade not available — pair the AirPlay protocol"
             )
         try:
-            await audio.set_volume(level * 100)  # pyatv wants 0-100
+            await audio.volume_up()
+            # Track current volume for future mute toggle.
+            self._snapshot_volume()
+        except Exception as err:  # noqa: BLE001
+            raise AdapterConnectionError(
+                f"volume_up failed: {type(err).__name__}: {err}"
+            ) from err
+
+    async def volume_down(self) -> None:
+        """Volume down via the Audio facade (pyatv 0.16+)."""
+        await self._ensure_connected()
+        audio = getattr(self._atv, "audio", None) if self._atv else None
+        if audio is None:
+            raise AdapterConnectionError(
+                "Audio facade not available — pair the AirPlay protocol"
+            )
+        try:
+            await audio.volume_down()
+            self._snapshot_volume()
+        except Exception as err:  # noqa: BLE001
+            raise AdapterConnectionError(
+                f"volume_down failed: {type(err).__name__}: {err}"
+            ) from err
+
+    async def set_volume(self, level: float) -> None:
+        """Set volume to an absolute level (0.0–1.0 → 0–100 in pyatv)."""
+        await self._ensure_connected()
+        audio = getattr(self._atv, "audio", None) if self._atv else None
+        if audio is None:
+            raise AdapterConnectionError(
+                "Audio facade not available — pair the AirPlay protocol"
+            )
+        try:
+            await audio.set_volume(level * 100)
+            if level > 0:
+                self._last_known_volume = level * 100
         except Exception as err:  # noqa: BLE001
             raise AdapterConnectionError(
                 f"set_volume failed: {type(err).__name__}: {err}"
             ) from err
 
     async def mute(self, muted: bool) -> None:
-        # Apple TV doesn't expose direct mute toggle in pyatv RemoteControl.
-        # Best approximation: set volume to 0 / restore. We don't store the
-        # pre-mute volume here (lossy) — users can use VOL_DOWN repeatedly
-        # for a true mute. Document this caveat in README.
-        raise UnsupportedButtonError(
-            "Apple TV adapter doesn't support direct mute toggle — use VOL_DOWN"
-        )
+        """Mute / un-mute by toggling volume between 0 and last-known level.
+
+        Apple TV doesn't expose a dedicated mute toggle, so we emulate one:
+          - mute=True  → save current volume, set volume to 0
+          - mute=False → restore volume to last-known level (or 30 as default)
+        """
+        await self._ensure_connected()
+        audio = getattr(self._atv, "audio", None) if self._atv else None
+        if audio is None:
+            raise AdapterConnectionError(
+                "Audio facade not available — pair the AirPlay protocol"
+            )
+        try:
+            if muted:
+                # Save the current volume before zeroing it.
+                self._snapshot_volume()
+                await audio.set_volume(0)
+            else:
+                restore_to = self._last_known_volume or 30.0
+                await audio.set_volume(restore_to)
+        except Exception as err:  # noqa: BLE001
+            raise AdapterConnectionError(
+                f"mute({muted}) failed: {type(err).__name__}: {err}"
+            ) from err
+
+    def _snapshot_volume(self) -> None:
+        """Cache the current volume so mute can restore later. Silent on errors."""
+        if not self._atv:
+            return
+        audio = getattr(self._atv, "audio", None)
+        if audio is None:
+            return
+        try:
+            level = audio.volume  # property, 0.0-100.0
+            if isinstance(level, (int, float)) and level > 0:
+                self._last_known_volume = float(level)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def select_source(self, source: str) -> None:
         await self._ensure_connected()

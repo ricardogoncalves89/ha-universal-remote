@@ -161,8 +161,20 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_apple_tv_scan(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Scan the network for Apple TVs and let the user pick one."""
+        """Scan the network for Apple TVs and let the user pick one.
+
+        pyatv.scan() returns every device that speaks any of its supported
+        protocols (AirPlay, RAOP, MRP, Companion, DMAP). That includes
+        HomePods, AirPort Express, AV receivers with AirPlay 2, and smart
+        TVs with AirPlay 2 baked in — none of which are Apple TVs proper.
+
+        We filter to keep only real Apple TVs using two combined signals:
+          1. operating_system in {TvOS, Legacy}  — covers Apple TV 4+ and 2/3
+          2. service in {Companion, MRP}  — these two protocols are only
+             implemented by Apple TVs, not by HomePods/airplay receivers.
+        """
         import pyatv  # local import: optional dep loaded at request time
+        from pyatv.const import OperatingSystem, Protocol
 
         errors: dict[str, str] = {}
 
@@ -183,13 +195,32 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             loop = self.hass.loop
-            self._atv_devices = await pyatv.scan(loop, timeout=5)
+            all_devices = await pyatv.scan(loop, timeout=5)
         except Exception:  # noqa: BLE001
             return self.async_show_form(
                 step_id="apple_tv_scan",
                 data_schema=vol.Schema({}),
                 errors={"base": "cannot_connect"},
             )
+
+        # Real-Apple-TV filter.
+        apple_tv_os = {OperatingSystem.TvOS, OperatingSystem.Legacy}
+        apple_tv_only_protocols = {Protocol.Companion, Protocol.MRP}
+
+        def _is_apple_tv(device: Any) -> bool:
+            try:
+                os = device.device_info.operating_system
+            except Exception:  # noqa: BLE001
+                os = None
+            if os not in apple_tv_os:
+                return False
+            try:
+                service_protocols = {s.protocol for s in device.services}
+            except Exception:  # noqa: BLE001
+                service_protocols = set()
+            return bool(service_protocols & apple_tv_only_protocols)
+
+        self._atv_devices = [d for d in all_devices if _is_apple_tv(d)]
 
         if not self._atv_devices:
             return self.async_abort(reason="no_devices_found")
@@ -414,7 +445,7 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional("allowed_sources", default=[]): list,
                 }),
                 description_placeholders={
-                    "note": "No sources are currently visible. Turn the TV on so it can report its inputs and apps, then come back."
+                    "note": "No sources are visible yet. Turn the device on so it can report its sources, then come back."
                 },
             )
 
@@ -428,7 +459,14 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        # Pass an empty placeholders dict so the templated description string
+        # ("...{note}") is rendered to the empty string rather than crashing
+        # with KeyError when no note is applicable.
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            description_placeholders={"note": ""},
+        )
 
 
 def cv_multi_select(options: list[str]):

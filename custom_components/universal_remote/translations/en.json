@@ -59,7 +59,7 @@
     "step": {
       "init": {
         "title": "Source preferences",
-        "description": "Pick which sources (HDMI inputs and apps) appear in the media_player picker. Leave empty to show all of them. {note}",
+        "description": "Pick which sources (inputs and apps) appear in the media_player picker. Leave empty to show all of them.{note}",
         "data": {
           "allowed_sources": "Sources to show"
         }
