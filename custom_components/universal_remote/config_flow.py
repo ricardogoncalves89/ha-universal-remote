@@ -404,6 +404,28 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Show the source-filter form, catching any internal error so the
+        user sees a clear message instead of an HTTP 500."""
+        try:
+            return await self._async_step_init_impl(user_input)
+        except Exception as err:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "Universal Remote options flow blew up; this is a bug. "
+                "Falling back to empty schema."
+            )
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema({}),
+                errors={"base": "cannot_connect"},
+                description_placeholders={
+                    "note": f" (Internal error: {type(err).__name__}: {err})"
+                },
+            )
+
+    async def _async_step_init_impl(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         from .const import DOMAIN  # local import to avoid circulars at top
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
         # Three sources of "what the TV can offer", in priority order:
@@ -432,6 +454,11 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=new_options)
 
         current = self._entry.options.get("allowed_sources", [])
+        # Make sure all are strings (defensive — some adapters may store
+        # placeholder values that snuck in).
+        live = [str(x) for x in live if x]
+        persisted = [str(x) for x in persisted if x]
+        current = [str(x) for x in current if x]
         # Union of all three so:
         #   - everything the TV currently reports is selectable,
         #   - sources reported in past sessions stay selectable across reloads,
@@ -439,11 +466,13 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
         choices = sorted(set(live) | set(persisted) | set(current))
 
         if not choices:
+            # No sources to choose from yet. Show an empty schema with only
+            # the explanatory note — submitting just dismisses the dialog.
+            # We deliberately do NOT include an `allowed_sources` field here
+            # because there are no valid values to offer.
             return self.async_show_form(
                 step_id="init",
-                data_schema=vol.Schema({
-                    vol.Optional("allowed_sources", default=[]): list,
-                }),
+                data_schema=vol.Schema({}),
                 description_placeholders={
                     "note": "No sources are visible yet. Turn the device on so it can report its sources, then come back."
                 },

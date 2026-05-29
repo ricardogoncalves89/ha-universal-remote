@@ -261,16 +261,42 @@ class AppleTVAdapter(RemoteAdapter):
         self._notify()
 
     async def _refresh_app_list(self) -> None:
-        """Fetch the launchable apps via Companion and build source_map."""
+        """Fetch the launchable apps via Companion and build source_map.
+
+        Called once shortly after connect(). The Companion protocol can take
+        a few seconds to be ready after the websocket comes up, so we retry
+        a few times with backoff before giving up.
+        """
         if self._atv is None:
             return
         apps_facade = getattr(self._atv, "apps", None)
         if apps_facade is None:
+            _LOGGER.warning(
+                "Apple TV apps facade is None — Companion not paired? "
+                "Source list will be empty."
+            )
             return
-        try:
-            apps = await apps_facade.app_list()
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Unable to fetch app list: %s", err)
+
+        last_err: Exception | None = None
+        for attempt in range(1, 6):  # 5 attempts: 1s, 2s, 4s, 8s, 16s
+            try:
+                apps = await apps_facade.app_list()
+                break
+            except Exception as err:  # noqa: BLE001
+                last_err = err
+                wait = 2 ** (attempt - 1)
+                _LOGGER.debug(
+                    "app_list() failed (attempt %d/5): %s; retrying in %ds",
+                    attempt, err, wait,
+                )
+                await asyncio.sleep(wait)
+        else:
+            _LOGGER.warning(
+                "Unable to fetch Apple TV app list after 5 attempts: %s. "
+                "Source picker will be empty. The integration will keep working "
+                "for remote-control commands.",
+                last_err,
+            )
             return
 
         new_app_map: dict[str, str] = {}
@@ -281,6 +307,12 @@ class AppleTVAdapter(RemoteAdapter):
             if ident and name:
                 new_app_map[ident] = name
                 new_source_map[name] = ident
+
+        _LOGGER.info(
+            "Apple TV reported %d apps; first few: %s",
+            len(new_source_map),
+            list(new_source_map.keys())[:5],
+        )
 
         if new_source_map == self._source_map:
             return
