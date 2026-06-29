@@ -158,8 +158,18 @@ class SamsungTizenAdapter(RemoteAdapter):
         Idempotent — calling twice is safe. The actual websocket open
         happens inside `start_listening` which keeps the connection
         alive for subsequent `send_commands` calls.
+
+        Even if the connect fails (TV off), we ensure the keepalive loop
+        is running so it can attempt passive reconnects when the TV later
+        comes online.
         """
         async with self._connect_lock:
+            # Make sure keepalive is running regardless of connection outcome.
+            # This way, if the TV is off now and the user powers it on later
+            # (with the physical remote), the keepalive will pick it up.
+            if self._keepalive_task is None or self._keepalive_task.done():
+                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
             if self._remote is not None and await self._is_alive_safe():
                 return
 
@@ -217,10 +227,6 @@ class SamsungTizenAdapter(RemoteAdapter):
             self._state.powered_on = True  # if WS opened, TV is on
             self._notify()
 
-            # Keepalive — periodically verify is_alive and reconnect if needed.
-            if self._keepalive_task is None or self._keepalive_task.done():
-                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-
             # Build the source list.
             asyncio.create_task(self._refresh_app_list())
 
@@ -254,30 +260,54 @@ class SamsungTizenAdapter(RemoteAdapter):
     # ----- Keepalive -----
 
     async def _keepalive_loop(self) -> None:
-        """Light keepalive — verifies the websocket is alive periodically."""
+        """Light keepalive — keeps the websocket alive and reconnects when
+        the TV comes back online (e.g. user powered it on via physical remote).
+
+        Three states we handle on each tick:
+         1. WS is alive → mark available + powered_on, do nothing else.
+         2. WS exists but is dead → close it and try a fresh connect.
+         3. _remote is None (after turn_off etc.) → try a passive connect.
+            Connect will fail fast if the TV is still off; succeed if the
+            user powered it on by other means.
+        """
         try:
             while True:
                 await asyncio.sleep(self.KEEPALIVE_INTERVAL_SECONDS)
-                alive = await self._is_alive_safe()
-                if alive:
-                    if not self._state.available:
+
+                if self._remote is not None and await self._is_alive_safe():
+                    # Healthy path — TV reachable, WS alive.
+                    if not self._state.available or not self._state.powered_on:
                         self._state.available = True
                         self._state.powered_on = True
                         self._notify()
-                else:
-                    if self._state.available:
-                        _LOGGER.debug(
-                            "Samsung websocket no longer alive — marking off"
-                        )
-                    self._state.available = False
-                    self._state.powered_on = False
-                    self._notify()
-                    if self._remote is not None:
-                        try:
-                            await self._remote.close()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        self._remote = None
+                    continue
+
+                # WS not alive — either we have a dead remote (drop it) or
+                # nothing at all. Either way, try a fresh connect.
+                if self._remote is not None:
+                    try:
+                        await self._remote.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._remote = None
+
+                # Passive connect attempt. If the TV is off this will fail
+                # fast (~5s timeout) and we mark powered_on=False but keep
+                # available=True so the next user command can wake the TV.
+                try:
+                    await asyncio.wait_for(self.connect(), timeout=8.0)
+                    _LOGGER.debug(
+                        "Samsung keepalive: passive reconnect succeeded"
+                    )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "Samsung keepalive: passive reconnect failed (%s) — "
+                        "TV likely off",
+                        type(err).__name__,
+                    )
+                    if self._state.powered_on:
+                        self._state.powered_on = False
+                        self._notify()
         except asyncio.CancelledError:
             return
 
@@ -460,7 +490,13 @@ class SamsungTizenAdapter(RemoteAdapter):
             ) from err
 
     async def turn_off(self) -> None:
-        """Send KEY_POWER (terminal — TV closes the websocket)."""
+        """Send KEY_POWER (terminal — TV closes the websocket).
+
+        We mark powered_on=False but keep available=True so the entity
+        remains usable in HA — turning the TV back on (via WoL or by
+        physical remote) should work without the user re-enabling the
+        entity. The next command will trigger a fresh connect.
+        """
         try:
             await self._send_key("KEY_POWER")
             _LOGGER.debug("Samsung KEY_POWER sent for standby")
@@ -470,7 +506,9 @@ class SamsungTizenAdapter(RemoteAdapter):
             )
 
         self._state.powered_on = False
-        self._state.available = False
+        # Keep available=True so HA accepts subsequent commands. The next
+        # command will reconnect, or the keepalive loop will mark off if
+        # nothing reconnects within the keepalive interval.
         self._notify()
         await self._reset_remote()
 
