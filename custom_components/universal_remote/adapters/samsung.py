@@ -122,10 +122,13 @@ _BUTTON_MAP: dict[str, str] = {
 # native TV functions (like Live TV via the tuner) with app launches
 # in the same source picker.
 _HARDCODED_APPS: dict[str, str] = {
-    # Native TV functions (sent as keys, not app launches)
-    "Live TV":      "KEY_TV",       # standard — analog/digital tuner switch
-    "Live TV (DTV)": "KEY_DTV",     # alternative — try this if Live TV doesn't switch
-    # Streaming apps (sent as app launches via NATIVE_LAUNCH)
+    # Native TV functions (sent as keys, not app launches).
+    # Smart Monitors (e.g. TU27F6005) don't have a direct KEY_TV shortcut —
+    # the only reliable way to reach Live TV is to open the source picker
+    # with KEY_SOURCE and let the user pick "TV" from the on-screen menu.
+    "Live TV":      "KEY_SOURCE",
+    # Streaming apps (launched via REST PUT — the WS path is deprecated
+    # on Tizen 2022+ and silently no-ops).
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
     "Disney+":      "3201901017640",
@@ -551,11 +554,22 @@ class SamsungTizenAdapter(RemoteAdapter):
         )
 
     async def select_source(self, source: str) -> None:
+        """Open a source — either a Tizen key sequence or a Tizen app.
+
+        On Tizen 2022+ the WebSocket `ed.apps.launch` command is deprecated
+        by Samsung and silently ignored (TV reports success but nothing
+        launches). We use the REST endpoint instead, which still works:
+            PUT http://<host>:8001/api/v2/applications/<app_id>
+
+        Source map values starting with "KEY_" are sent as remote keys
+        (e.g. "Live TV" -> KEY_SOURCE opens the source picker on the TV).
+        Everything else is treated as a Tizen app ID for the REST launch.
+        """
         value = self._source_map.get(source)
         if not value:
             raise AdapterConnectionError(f"Unknown source {source!r}")
 
-        # Probe before attempting — avoids 5s WS timeout when TV is off.
+        # Probe before attempting — avoids slow timeouts when TV is off.
         if not await self._tcp_probe():
             _LOGGER.debug(
                 "Samsung select_source(%s -> %s) requested but TV not reachable",
@@ -572,9 +586,7 @@ class SamsungTizenAdapter(RemoteAdapter):
             self._state.powered_on = True
             self._notify()
 
-        # Two flavours of source entry:
-        #   * "KEY_xxx"  → send as a remote key (e.g. Live TV via KEY_TV)
-        #   * "<digits>" → launch as a Tizen app (e.g. Netflix bundle ID)
+        # KEY_-prefixed entries are remote keys, not app launches.
         if value.startswith("KEY_"):
             _LOGGER.debug(
                 "Samsung select_source(%r) -> sending key %s", source, value
@@ -582,41 +594,43 @@ class SamsungTizenAdapter(RemoteAdapter):
             await self._send_key(value)
             return
 
-        # App launch path.
+        # App launch via REST PUT. Tizen exposes this on port 8001 (HTTP,
+        # no auth). Note: this is the SAME endpoint that the deprecated
+        # WS `launch_app` shim falls back to on newer TVs — the REST
+        # endpoint is what still actually works in 2022+ firmwares.
+        url = f"http://{self._host}:8001/api/v2/applications/{value}"
+        _LOGGER.debug("Samsung REST PUT %s (source %r)", url, source)
+
         try:
-            from samsungtvws.remote import ChannelEmitCommand
+            import aiohttp
         except ImportError as err:
             raise AdapterConnectionError(
-                f"samsungtvws missing ChannelEmitCommand: {err}"
+                f"aiohttp not available for REST app launch: {err}"
             ) from err
 
-        await self._ensure_connected()
-
-        cmd = ChannelEmitCommand.launch_app(value, app_type="NATIVE_LAUNCH")
+        timeout = aiohttp.ClientTimeout(total=5.0)
         try:
-            await self._remote.send_commands([cmd])
-            _LOGGER.debug(
-                "Samsung launch_app(%s) sent for source %r", value, source
-            )
-        except Exception as err:  # noqa: BLE001
-            err_name = type(err).__name__
-            _LOGGER.debug(
-                "Samsung launch_app(%s) failed: %s: %s — reconnecting",
-                value, err_name, err,
-            )
-            await self._reset_remote()
-            try:
-                await self._ensure_connected()
-                await self._remote.send_commands([cmd])
-                _LOGGER.debug(
-                    "Samsung launch_app(%s) sent after reconnect", value
-                )
-            except Exception as err2:  # noqa: BLE001
-                await self._reset_remote()
-                raise AdapterConnectionError(
-                    f"launch_app({source!r}) failed: "
-                    f"{type(err2).__name__}: {err2}"
-                ) from err2
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.put(url) as resp:
+                    body = await resp.text()
+                    _LOGGER.debug(
+                        "Samsung REST launch_app(%s) -> HTTP %s: %s",
+                        value, resp.status, body[:200],
+                    )
+                    if resp.status >= 400:
+                        raise AdapterConnectionError(
+                            f"REST launch_app({source!r}) returned "
+                            f"HTTP {resp.status}: {body[:200]}"
+                        )
+        except aiohttp.ClientError as err:
+            raise AdapterConnectionError(
+                f"REST launch_app({source!r}) failed: "
+                f"{type(err).__name__}: {err}"
+            ) from err
+        except asyncio.TimeoutError as err:
+            raise AdapterConnectionError(
+                f"REST launch_app({source!r}) timed out"
+            ) from err
 
     async def play(self) -> None:
         await self.press_button(Button.PLAY)
