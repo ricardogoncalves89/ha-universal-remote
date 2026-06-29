@@ -1,5 +1,5 @@
 /**
- * Universal Remote Card v0.6.1
+ * Universal Remote Card v0.6.3
  *
  * Physical-remote-style Lovelace card for the Universal Remote
  * Home Assistant integration. Mobile-first, light/dark themed.
@@ -330,20 +330,33 @@ class UniversalRemoteCard extends HTMLElement {
             }
         }
 
-        // Sources list (from current TV's media_player)
+        // Sources list (from current TV's media_player). When there's
+        // no media_player_entity for the current TV, hide the whole
+        // grid — the remote-only controls below still work because
+        // they go via remote.send_command.
         const mp = r && r.media_player_entity;
+        const sourcesGrid = this.shadowRoot.querySelector(".sources-grid");
         const mpState = mp ? this._hass.states[mp] : null;
-        const sources =
-            mpState &&
-            mpState.attributes &&
-            Array.isArray(mpState.attributes.source_list)
-                ? mpState.attributes.source_list
-                : [];
 
-        const sourcesKey = `${this._currentIndex}::${sources.join("|")}`;
-        if (sourcesKey !== this._lastSourceList) {
-            this._lastSourceList = sourcesKey;
-            this._renderSources(sources);
+        if (!mp) {
+            if (sourcesGrid) sourcesGrid.style.display = "none";
+            // Reset cache so a future config change with a media_player
+            // forces a full re-render.
+            this._lastSourceList = null;
+        } else {
+            if (sourcesGrid) sourcesGrid.style.display = "";
+            const sources =
+                mpState &&
+                mpState.attributes &&
+                Array.isArray(mpState.attributes.source_list)
+                    ? mpState.attributes.source_list
+                    : [];
+
+            const sourcesKey = `${this._currentIndex}::${sources.join("|")}`;
+            if (sourcesKey !== this._lastSourceList) {
+                this._lastSourceList = sourcesKey;
+                this._renderSources(sources);
+            }
         }
 
         // Play/Pause icon based on media_player state
@@ -890,7 +903,9 @@ class UniversalRemoteCard extends HTMLElement {
     }
 }
 
-customElements.define("universal-remote-card", UniversalRemoteCard);
+if (!customElements.get("universal-remote-card")) {
+    customElements.define("universal-remote-card", UniversalRemoteCard);
+}
 
 // =================================================================
 // Visual editor
@@ -1289,24 +1304,30 @@ class UniversalRemoteCardEditor extends HTMLElement {
     }
 }
 
-customElements.define(
-    "universal-remote-card-editor",
-    UniversalRemoteCardEditor,
-);
+if (!customElements.get("universal-remote-card-editor")) {
+    customElements.define(
+        "universal-remote-card-editor",
+        UniversalRemoteCardEditor,
+    );
+}
 
 window.customCards = window.customCards || [];
-window.customCards.push({
-    type: "universal-remote-card",
-    name: "Universal Remote Card",
-    description:
-        "Physical-remote-style card for the Universal Remote integration (Samsung / LG / Apple TV). Single TV or multi-TV with dropdown.",
-    preview: false,
-    documentationURL:
-        "https://github.com/ricardogoncalves89/ha-universal-remote#lovelace-card",
-});
+if (
+    !window.customCards.some((c) => c.type === "universal-remote-card")
+) {
+    window.customCards.push({
+        type: "universal-remote-card",
+        name: "Universal Remote Card",
+        description:
+            "Physical-remote-style card for the Universal Remote integration (Samsung / LG / Apple TV). Single TV or multi-TV with dropdown.",
+        preview: false,
+        documentationURL:
+            "https://github.com/ricardogoncalves89/ha-universal-remote#lovelace-card",
+    });
+}
 
 console.info(
-    "%c UNIVERSAL-REMOTE-CARD %c v0.6.1 ",
+    "%c UNIVERSAL-REMOTE-CARD %c v0.6.3 ",
     "color: white; background: #d8454a; padding: 2px 4px; border-radius: 3px 0 0 3px;",
     "color: white; background: #444; padding: 2px 4px; border-radius: 0 3px 3px 0;",
 );
