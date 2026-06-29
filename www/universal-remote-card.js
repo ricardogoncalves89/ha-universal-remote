@@ -1,5 +1,5 @@
 /**
- * Universal Remote Card v0.3.0
+ * Universal Remote Card v0.5.1
  *
  * Physical-remote-style Lovelace card for the Universal Remote
  * Home Assistant integration. Mobile-first, light/dark themed.
@@ -10,11 +10,15 @@
  *   media_player_entity: media_player.tv_escritorio
  *   title: TV Escritório
  *
- * Sources are pulled live from the media_player's source_list in the
- * order the integration exposes them. Recognised streaming brands
- * (Netflix, YouTube, Amazon Prime Video, Disney+) render with their
- * official logos via CDN. Live TV / HDMI render with TV/plug icons.
- * Anything else falls back to text initials.
+ * Sources come live from the media_player's source_list. Recognised
+ * streaming brands (Netflix, YouTube, Amazon Prime Video, Disney+)
+ * render with official logos from dashboard-icons.org. HDMI sources
+ * show their full label (HDMI 1, HDMI ARC, etc.) for clarity. Live TV
+ * uses an inline TV icon. Anything else falls back to text initials.
+ *
+ * The card includes a built-in visual editor — when you click "Edit
+ * card" in Lovelace, you get entity pickers for the remote and the
+ * media_player, plus a title field.
  */
 
 // -----------------------------------------------------------------
@@ -24,6 +28,7 @@ const ICONS = {
     list: `<path d="M3 5h18v2H3zm0 6h18v2H3zm0 6h18v2H3z" />`,
     power: `<path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0 1 19 12a7 7 0 0 1-14 0 6.92 6.92 0 0 1 2.59-5.41L6.17 5.17A9 9 0 1 0 21 12a8.94 8.94 0 0 0-3.17-6.83z"/>`,
     keypad: `<path d="M5 7h2v2H5V7zm6 0h2v2h-2V7zm6 0h2v2h-2V7zM5 11h2v2H5v-2zm6 0h2v2h-2v-2zm6 0h2v2h-2v-2zM5 15h2v2H5v-2zm6 0h2v2h-2v-2zm6 0h2v2h-2v-2z"/>`,
+    home: `<path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>`,
     volume: `<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>`,
     plus: `<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>`,
     minus: `<path d="M19 13H5v-2h14v2z"/>`,
@@ -36,7 +41,6 @@ const ICONS = {
     prev: `<path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/>`,
     next: `<path d="M6 18l8.5-6L6 6v12zm10-12v12h2V6h-2z"/>`,
     tv: `<path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/>`,
-    hdmi: `<path d="M19 9h-2V7h-2v2h-2V7h-2v2H9V7H7v2H5c-1.1 0-2 .9-2 2v3c0 1.1.9 2 2 2h6v4h2v-4h6c1.1 0 2-.9 2-2v-3c0-1.1-.9-2-2-2z"/>`,
 };
 
 const svg = (path, opts = {}) => {
@@ -45,55 +49,40 @@ const svg = (path, opts = {}) => {
 };
 
 // -----------------------------------------------------------------
-// Source matchers — order matters (first match wins).
+// Brand logos from dashboard-icons (Homarr Labs, CC0 collection
+// designed for dashboards). Full-colour official logos served from
+// the rock-solid jsdelivr CDN.
 // -----------------------------------------------------------------
-// Each kind:
-//   icon  -> inline SVG (Live TV, HDMI)
-//   img   -> external <img> from a CDN (official brand logo)
-//   badge -> fallback: 1-2 letter pill in a neutral colour
+const DI = (slug) =>
+    `https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/${slug}.svg`;
+
+// Source matchers — first match wins. Kinds:
+//   icon  -> inline SVG (Live TV, native sources)
+//   img   -> external <img> (official brand logo from CDN)
+//   text  -> render the source name verbatim as a label (HDMI 1, etc.)
 const SOURCE_MATCHERS = [
-    // Native TV functions
+    // Native TV
     { re: /\b(live ?tv|^tv$|tuner|antena)\b/i, kind: "icon", icon: "tv" },
-    { re: /\bhdmi/i, kind: "icon", icon: "hdmi" },
-    // Streaming brands — official logos via simpleicons CDN
-    {
-        re: /netflix/i,
-        kind: "img",
-        url: "https://cdn.simpleicons.org/netflix/E50914",
-    },
-    {
-        re: /youtube/i,
-        kind: "img",
-        url: "https://cdn.simpleicons.org/youtube/FF0000",
-    },
-    {
-        re: /(prime ?video|amazon)/i,
-        kind: "img",
-        url: "https://cdn.simpleicons.org/primevideo/00A8E1",
-    },
-    // Disney+ isn't in simpleicons (Disney IP); use SVGRepo CC0 SVG.
-    // The brand colour `#0F2D5C` is baked into that SVG file.
-    {
-        re: /disney/i,
-        kind: "img",
-        url: "https://www.svgrepo.com/show/504281/disneyplus.svg",
-    },
-    // Common Portuguese broadcast channels — treat as Live-TV-style
+    // HDMI variants: show the full label (HDMI, HDMI 1, HDMI ARC, etc.)
+    { re: /\bhdmi/i, kind: "text" },
+    // Streaming brands — official logos
+    { re: /netflix/i, kind: "img", url: DI("netflix") },
+    { re: /youtube/i, kind: "img", url: DI("youtube") },
+    { re: /(prime ?video|amazon)/i, kind: "img", url: DI("prime-video") },
+    { re: /disney/i, kind: "img", url: DI("disney-plus") },
+    // Portuguese broadcast channels
     { re: /(rtp|sic|tvi|cmtv|porto canal)/i, kind: "icon", icon: "tv" },
 ];
 
 function sourceVisual(source) {
     for (const m of SOURCE_MATCHERS) {
         if (m.re.test(source)) {
-            if (m.kind === "icon") {
-                return { type: "icon", icon: ICONS[m.icon] };
-            }
-            if (m.kind === "img") {
-                return { type: "img", url: m.url };
-            }
+            if (m.kind === "icon") return { type: "icon", icon: ICONS[m.icon] };
+            if (m.kind === "img") return { type: "img", url: m.url };
+            if (m.kind === "text") return { type: "text" };
         }
     }
-    // Fallback: initials in a neutral pill so it's still readable.
+    // Fallback: initials in neutral pill
     const letters = source
         .replace(/[^A-Za-z0-9 ]/g, "")
         .trim()
@@ -102,22 +91,23 @@ function sourceVisual(source) {
         .join("")
         .slice(0, 2)
         .toUpperCase();
-    return {
-        type: "badge",
-        letter: letters || "?",
-    };
+    return { type: "badge", letter: letters || "?" };
 }
 
-// -----------------------------------------------------------------
-// Custom element
-// -----------------------------------------------------------------
+// =================================================================
+// Main card
+// =================================================================
 
 class UniversalRemoteCard extends HTMLElement {
     static getStubConfig() {
         return {
-            entity: "remote.your_tv",
-            media_player_entity: "media_player.your_tv",
+            entity: "",
+            media_player_entity: "",
         };
+    }
+
+    static getConfigElement() {
+        return document.createElement("universal-remote-card-editor");
     }
 
     setConfig(config) {
@@ -194,6 +184,20 @@ class UniversalRemoteCard extends HTMLElement {
         );
     }
 
+    connectedCallback() {
+        // Start a low-frequency timer to refresh the relative time
+        // ("há 5min" → "há 6min") even when no hass updates arrive.
+        if (this._statusTimer) clearInterval(this._statusTimer);
+        this._statusTimer = setInterval(() => this._updateStatus(), 30000);
+    }
+
+    disconnectedCallback() {
+        if (this._statusTimer) {
+            clearInterval(this._statusTimer);
+            this._statusTimer = null;
+        }
+    }
+
     _updateState() {
         if (!this.shadowRoot || !this._hass || !this._config) return;
 
@@ -210,6 +214,8 @@ class UniversalRemoteCard extends HTMLElement {
                     : null;
             titleEl.textContent = friendly || this._config.entity;
         }
+
+        this._updateStatus();
 
         const mp = this._config.media_player_entity;
         const mpState = mp ? this._hass.states[mp] : null;
@@ -230,11 +236,72 @@ class UniversalRemoteCard extends HTMLElement {
             const ppBtn = this.shadowRoot.querySelector(".btn-playpause");
             if (ppBtn) {
                 ppBtn.innerHTML = svg(playing ? ICONS.pause : ICONS.play);
-                ppBtn.setAttribute(
-                    "aria-label",
-                    playing ? "Pause" : "Play",
-                );
+                ppBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
             }
+        }
+    }
+
+    _updateStatus() {
+        if (!this.shadowRoot || !this._hass || !this._config) return;
+
+        const remoteState = this._hass.states[this._config.entity];
+        const statusEl = this.shadowRoot.querySelector(".status");
+        const stateEl = this.shadowRoot.querySelector(".status-state");
+        const timeEl = this.shadowRoot.querySelector(".status-time");
+        if (!statusEl || !stateEl || !timeEl) return;
+
+        if (!remoteState) {
+            statusEl.style.display = "none";
+            return;
+        }
+
+        statusEl.style.display = "flex";
+        const isOn = remoteState.state === "on";
+        statusEl.classList.toggle("is-on", isOn);
+        statusEl.classList.toggle("is-off", !isOn);
+        stateEl.textContent = isOn ? "ON" : "OFF";
+
+        if (remoteState.last_changed) {
+            timeEl.textContent = this._formatRelative(remoteState.last_changed);
+            timeEl.style.display = "inline";
+        } else {
+            timeEl.style.display = "none";
+        }
+    }
+
+    _getLocale() {
+        if (this._hass) {
+            if (this._hass.locale && this._hass.locale.language)
+                return this._hass.locale.language;
+            if (this._hass.language) return this._hass.language;
+        }
+        return navigator.language || "pt-PT";
+    }
+
+    _formatRelative(isoString) {
+        if (!isoString) return "";
+        const date = new Date(isoString);
+        if (isNaN(date.getTime())) return "";
+        const now = new Date();
+        const diffSec = (date.getTime() - now.getTime()) / 1000;
+        const locale = this._getLocale();
+
+        try {
+            const rtf = new Intl.RelativeTimeFormat(locale, {
+                numeric: "auto",
+                style: "short",
+            });
+            const abs = Math.abs(diffSec);
+            if (abs < 60) return rtf.format(Math.round(diffSec), "second");
+            if (abs < 3600) return rtf.format(Math.round(diffSec / 60), "minute");
+            if (abs < 86400) return rtf.format(Math.round(diffSec / 3600), "hour");
+            if (abs < 604800) return rtf.format(Math.round(diffSec / 86400), "day");
+            return date.toLocaleDateString(locale, {
+                day: "2-digit",
+                month: "short",
+            });
+        } catch (e) {
+            return date.toLocaleString(locale);
         }
     }
 
@@ -255,10 +322,8 @@ class UniversalRemoteCard extends HTMLElement {
             .map((source) => {
                 const vis = sourceVisual(source);
                 const safe = this._escape(source);
+
                 if (vis.type === "img") {
-                    // <img> with onerror fallback. If the CDN call fails,
-                    // we replace it with an initials badge so the user
-                    // still sees what the button does.
                     const initials = source
                         .replace(/[^A-Za-z0-9 ]/g, "")
                         .trim()
@@ -288,6 +353,16 @@ class UniversalRemoteCard extends HTMLElement {
                             ${svg(vis.icon)}
                         </button>`;
                 }
+                if (vis.type === "text") {
+                    // Verbatim label, e.g. "HDMI 1", "HDMI ARC"
+                    return `
+                        <button class="btn btn-source btn-source-text"
+                                data-source="${safe}"
+                                aria-label="${safe}"
+                                title="${safe}">
+                            <span class="source-label">${safe}</span>
+                        </button>`;
+                }
                 // badge fallback
                 return `
                     <button class="btn btn-source"
@@ -315,6 +390,10 @@ class UniversalRemoteCard extends HTMLElement {
             <style>${this._css()}</style>
             <ha-card class="card">
                 ${this._config.title !== false ? `<div class="title">${this._config.title || ""}</div>` : ""}
+                <div class="status" style="display:none">
+                    <span class="status-state"></span>
+                    <span class="status-time"></span>
+                </div>
                 <div class="remote">
 
                     <!-- Row 1: List | Power | Keypad -->
@@ -333,10 +412,10 @@ class UniversalRemoteCard extends HTMLElement {
                         <button class="btn btn-arrow dpad-down" data-cmd="DOWN" aria-label="Down">${svg(ICONS.down)}</button>
                     </div>
 
-                    <!-- Back | Exit -->
+                    <!-- Back | Home -->
                     <div class="row row-2">
                         <button class="btn btn-pill" data-cmd="BACK">BACK</button>
-                        <button class="btn btn-pill" data-cmd="EXIT">EXIT</button>
+                        <button class="btn btn-pill" data-cmd="HOME" aria-label="Home">${svg(ICONS.home)}</button>
                     </div>
 
                     <!-- Sources grid (dynamic) -->
@@ -416,10 +495,49 @@ class UniversalRemoteCard extends HTMLElement {
                 font-size: 0.95rem;
                 color: var(--secondary-text-color);
                 text-align: center;
-                margin-bottom: 14px;
+                margin-bottom: 8px;
                 font-weight: 500;
                 letter-spacing: 0.5px;
                 text-transform: uppercase;
+            }
+            .status {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                margin: 0 auto 12px;
+                font-size: 0.8rem;
+            }
+            .status-state {
+                font-weight: 700;
+                letter-spacing: 1px;
+                padding: 2px 10px;
+                border-radius: 10px;
+                background: var(--urc-btn-bg);
+                color: var(--secondary-text-color);
+                line-height: 1.4;
+            }
+            .status.is-on .status-state {
+                background: rgba(76, 175, 80, 0.15);
+                color: #2e7d32;
+            }
+            :host-context([data-theme='dark']) .status.is-on .status-state,
+            .status.is-on .status-state {
+                /* Slightly brighter green tone reads well on both themes */
+            }
+            .status.is-off .status-state {
+                background: var(--urc-btn-bg-active);
+                color: var(--secondary-text-color);
+            }
+            .status-time {
+                color: var(--secondary-text-color);
+                font-size: 0.78rem;
+                font-variant-numeric: tabular-nums;
+            }
+            .status-time::before {
+                content: '·';
+                margin-right: 6px;
+                opacity: 0.5;
             }
             .remote {
                 display: flex;
@@ -524,7 +642,7 @@ class UniversalRemoteCard extends HTMLElement {
                 box-shadow: 0 0 0 2px rgba(216,69,74,0.25);
             }
 
-            /* Sources grid: 4 columns, dynamic rows */
+            /* Sources grid */
             .sources-grid {
                 display: grid;
                 grid-template-columns: repeat(4, 1fr);
@@ -549,12 +667,24 @@ class UniversalRemoteCard extends HTMLElement {
             }
             /* Brand logo from CDN */
             .btn-source img.logo {
-                width: 30px;
-                height: 30px;
+                width: 32px;
+                height: 32px;
                 object-fit: contain;
-                pointer-events: none; /* clicks go through to the button */
+                pointer-events: none;
             }
-            /* Fallback initials pill — also used when <img> errors out */
+            /* Text label for HDMI / generic source name */
+            .btn-source-text {
+                padding: 4px 6px;
+            }
+            .btn-source-text .source-label {
+                font-weight: 700;
+                font-size: 0.85rem;
+                color: var(--primary-text-color);
+                text-align: center;
+                line-height: 1.1;
+                word-break: break-word;
+            }
+            /* Fallback initials pill */
             .badge-fallback {
                 display: inline-flex;
                 align-items: center;
@@ -574,6 +704,7 @@ class UniversalRemoteCard extends HTMLElement {
             .col-track {
                 display: flex;
                 flex-direction: column;
+                justify-content: center;
                 background: var(--urc-btn-bg);
                 border-radius: 28px;
                 padding: 6px 0;
@@ -606,6 +737,165 @@ class UniversalRemoteCard extends HTMLElement {
 
 customElements.define("universal-remote-card", UniversalRemoteCard);
 
+// =================================================================
+// Visual editor
+// =================================================================
+// This is what Lovelace shows when the user clicks "Edit card" on
+// our card. It renders ha-entity-picker for `entity` and
+// `media_player_entity`, plus a text field for `title`. Every change
+// fires a `config-changed` event back to Lovelace.
+//
+// ha-entity-picker, ha-textfield, ha-formfield etc. are HA's own
+// custom elements; they're already registered globally inside the HA
+// frontend so we can just use them by tag.
+// =================================================================
+
+class UniversalRemoteCardEditor extends HTMLElement {
+    setConfig(config) {
+        this._config = { ...config };
+        if (this.shadowRoot) this._sync();
+    }
+
+    set hass(hass) {
+        this._hass = hass;
+        if (!this._rendered) {
+            this._render();
+            this._rendered = true;
+        } else {
+            // Keep pickers in sync with latest hass (icons / state).
+            const ePicker = this.shadowRoot.getElementById("entity-picker");
+            const mPicker = this.shadowRoot.getElementById("mp-picker");
+            if (ePicker) ePicker.hass = hass;
+            if (mPicker) mPicker.hass = hass;
+        }
+    }
+
+    _render() {
+        this.attachShadow({ mode: "open" });
+        this.shadowRoot.innerHTML = `
+            <style>
+                .form {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                    padding: 8px 0;
+                }
+                .row { display: block; }
+                .help {
+                    font-size: 12px;
+                    color: var(--secondary-text-color);
+                    margin-top: 4px;
+                }
+                input.title-input {
+                    width: 100%;
+                    font: inherit;
+                    padding: 10px 12px;
+                    box-sizing: border-box;
+                    border: 1px solid var(--divider-color, #ccc);
+                    border-radius: 6px;
+                    background: var(--card-background-color, #fff);
+                    color: var(--primary-text-color, #000);
+                }
+                label.field-label {
+                    display: block;
+                    font-size: 13px;
+                    color: var(--secondary-text-color);
+                    margin-bottom: 4px;
+                    font-weight: 500;
+                }
+            </style>
+            <div class="form">
+                <div class="row">
+                    <ha-entity-picker
+                        id="entity-picker"
+                        label="Remote entity (required)"
+                        allow-custom-entity></ha-entity-picker>
+                    <div class="help">
+                        The remote.* entity from this integration (sends button commands).
+                    </div>
+                </div>
+
+                <div class="row">
+                    <ha-entity-picker
+                        id="mp-picker"
+                        label="Media player entity"
+                        allow-custom-entity></ha-entity-picker>
+                    <div class="help">
+                        The corresponding media_player.* entity. Provides the source
+                        list and lets the play/pause toggle know what's playing.
+                    </div>
+                </div>
+
+                <div class="row">
+                    <label class="field-label" for="title-input">Title (optional)</label>
+                    <input id="title-input"
+                           class="title-input"
+                           type="text"
+                           placeholder="Leave empty to use the remote's friendly name" />
+                </div>
+            </div>
+        `;
+
+        const entityPicker = this.shadowRoot.getElementById("entity-picker");
+        entityPicker.hass = this._hass;
+        entityPicker.value = this._config.entity || "";
+        // includeDomains needs to be a property, not an attribute.
+        entityPicker.includeDomains = ["remote"];
+        entityPicker.addEventListener("value-changed", (ev) => {
+            this._updateField("entity", ev.detail.value);
+        });
+
+        const mpPicker = this.shadowRoot.getElementById("mp-picker");
+        mpPicker.hass = this._hass;
+        mpPicker.value = this._config.media_player_entity || "";
+        mpPicker.includeDomains = ["media_player"];
+        mpPicker.addEventListener("value-changed", (ev) => {
+            this._updateField("media_player_entity", ev.detail.value);
+        });
+
+        const titleInput = this.shadowRoot.getElementById("title-input");
+        titleInput.value = this._config.title || "";
+        titleInput.addEventListener("input", (ev) => {
+            this._updateField("title", ev.target.value);
+        });
+    }
+
+    _sync() {
+        if (!this.shadowRoot) return;
+        const ePicker = this.shadowRoot.getElementById("entity-picker");
+        const mPicker = this.shadowRoot.getElementById("mp-picker");
+        const tInput = this.shadowRoot.getElementById("title-input");
+        if (ePicker && ePicker.value !== (this._config.entity || ""))
+            ePicker.value = this._config.entity || "";
+        if (mPicker && mPicker.value !== (this._config.media_player_entity || ""))
+            mPicker.value = this._config.media_player_entity || "";
+        if (tInput && tInput.value !== (this._config.title || ""))
+            tInput.value = this._config.title || "";
+    }
+
+    _updateField(key, value) {
+        const config = { ...this._config };
+        if (value === undefined || value === null || value === "") {
+            delete config[key];
+        } else {
+            config[key] = value;
+        }
+        this._config = config;
+        this.dispatchEvent(
+            new CustomEvent("config-changed", {
+                detail: { config: this._config },
+                bubbles: true,
+                composed: true,
+            }),
+        );
+    }
+}
+
+customElements.define(
+    "universal-remote-card-editor",
+    UniversalRemoteCardEditor,
+);
+
 window.customCards = window.customCards || [];
 window.customCards.push({
     type: "universal-remote-card",
@@ -618,7 +908,7 @@ window.customCards.push({
 });
 
 console.info(
-    "%c UNIVERSAL-REMOTE-CARD %c v0.3.0 ",
+    "%c UNIVERSAL-REMOTE-CARD %c v0.5.1 ",
     "color: white; background: #d8454a; padding: 2px 4px; border-radius: 3px 0 0 3px;",
     "color: white; background: #444; padding: 2px 4px; border-radius: 0 3px 3px 0;",
 );
