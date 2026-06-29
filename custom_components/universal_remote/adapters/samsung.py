@@ -1,27 +1,29 @@
 """Samsung Tizen TV adapter — uses samsungtvws 2.7.x.
 
-Pairing flow:
-  1. Open WSS connection to https://<host>:8002/...
-  2. The TV shows a popup "Allow this device to access this TV?"
-  3. User accepts on the TV → the server returns a token (auto-stored in `remote.token`)
-  4. The token is persisted in the config entry and reused on every reconnect.
+Lifecycle (the painful lessons baked in):
+
+  * `SamsungTVWSAsyncRemote` is designed to be opened ONCE and reused.
+    To keep the websocket alive between commands you must call
+    `start_listening(callback)` and keep the instance around.
+
+  * Plain `send_command("KEY_FOO")` (str API) opens a one-shot connection
+    on every call. That works for occasional commands but cannot reuse the
+    paired session correctly on this lib version and often raises
+    `ConnectionClosedError: no close frame received or sent` on the second
+    use. We avoid it and use the typed-command API instead:
+      `send_commands([SendRemoteKey.click("KEY_FOO")])`
+    which is what the official HA samsungtv integration does.
+
+  * Pairing is its own short-lived flow that uses `open()` once and
+    captures `remote.token`. We do that in the config flow, not here.
+
+  * Many Smart Monitor / Frame TV firmwares answer the WS handshake but
+    silently ignore `app_list` and don't expose REST `/api/v2/main`. We
+    treat these as expected and fall back to a hardcoded source list.
 
 Wake-up:
-  Samsung Tizen TVs answer Wake-on-LAN while in standby (the network chip
-  stays alive). We require the MAC in the config so we can wake via HA's
-  wake_on_lan.send_magic_packet service.
-
-State updates:
-  Unlike LG webOS or pyatv, samsungtvws is request-response. We poll the
-  REST endpoint (port 8001, no auth) every POLL_INTERVAL_SECONDS for power
-  + current app. If the REST endpoint stops responding we treat the TV as
-  off and drop the websocket.
-
-Sources / apps:
-  Listed via WebSocket app_list(). On many 2024+ Smart Monitors and Frame
-  models the TV silently ignores the request — there's a documented issue
-  for this. When the WS path fails we fall back to a curated hardcoded
-  list so the source picker is still useful.
+  WoL works while the TV is in standby (network chip stays alive). We
+  require the MAC in the config.
 """
 from __future__ import annotations
 
@@ -45,12 +47,10 @@ from .base import (
 _LOGGER = logging.getLogger(__name__)
 
 
-# Config keys specific to Samsung
 CONF_SAMSUNG_TOKEN = "samsung_token"
 
 
 # Canonical Button -> Tizen KEY_ string.
-# Full list at https://developer.samsung.com/smarttv/develop/guides/user-interaction/key-codes.html
 _BUTTON_MAP: dict[str, str] = {
     Button.UP: "KEY_UP",
     Button.DOWN: "KEY_DOWN",
@@ -96,10 +96,8 @@ _BUTTON_MAP: dict[str, str] = {
 }
 
 
-# Hardcoded fallback list. Used only when WS app_list() refuses to return
-# the installed apps (common on 2024+ Tizen monitors).
-# IDs are TIZEN app IDs (numeric strings); these come from Samsung community
-# documentation and tend to be stable across regions.
+# Hardcoded fallback. We always seed with this because most 2024+ Smart
+# Monitors silently ignore the WS app_list endpoint.
 _HARDCODED_APPS: dict[str, str] = {
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
@@ -110,8 +108,6 @@ _HARDCODED_APPS: dict[str, str] = {
     "HBO Max":      "3201601007230",
     "Plex":         "3201512006963",
     "Twitch":       "3202203026841",
-    # Portugal. Will be updated when Ricardo confirms the right ID via
-    # the WS app_list endpoint or by trial-and-error on the TV.
     "Vodafone TV":  "3201709014731",
 }
 
@@ -125,8 +121,8 @@ class SamsungTizenAdapter(RemoteAdapter):
         Button.POWER_OFF,
     }
 
-    # Samsung doesn't push state — poll on this cadence.
-    POLL_INTERVAL_SECONDS = 10
+    # How often we ping the websocket to keep state fresh.
+    KEEPALIVE_INTERVAL_SECONDS = 30
 
     def __init__(
         self,
@@ -139,214 +135,201 @@ class SamsungTizenAdapter(RemoteAdapter):
         self._token: str | None = config.get(CONF_SAMSUNG_TOKEN)
         self._name: str = config.get("name", "Universal Remote")
 
-        self._remote: Any = None  # SamsungTVWSAsyncRemote instance
-        self._rest: Any = None    # SamsungTVAsyncRest instance
+        self._remote: Any = None  # SamsungTVWSAsyncRemote
         self._connect_lock = asyncio.Lock()
-        self._poll_task: asyncio.Task | None = None
+        self._keepalive_task: asyncio.Task | None = None
 
-        # label -> tizen app_id (numeric string)
         self._source_map: dict[str, str] = {}
-        self.on_source_map_changed = None  # set by coordinator
+        self.on_source_map_changed = None
 
-        # Seed source_map from persisted known_sources so the OptionsFlow
-        # has something to show even immediately after a reload.
+        # Seed source_map from persisted known_sources so OptionsFlow has
+        # something to show right after a reload.
         seed = config.get("known_sources")
         if isinstance(seed, list):
             for label in seed:
                 if isinstance(label, str):
-                    self._source_map[label] = ""  # placeholder until WS refresh
+                    self._source_map[label] = ""
 
     # ----- Lifecycle -----
 
     async def connect(self) -> None:
-        """Open the websocket + REST clients."""
+        """Open the websocket and start listening.
+
+        Idempotent — calling twice is safe. The actual websocket open
+        happens inside `start_listening` which keeps the connection
+        alive for subsequent `send_commands` calls.
+        """
         async with self._connect_lock:
-            if self._remote is not None:
+            if self._remote is not None and await self._is_alive_safe():
                 return
+
+            # Clear any stale instance.
+            if self._remote is not None:
+                try:
+                    await self._remote.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._remote = None
 
             try:
                 from samsungtvws.async_remote import SamsungTVWSAsyncRemote
-                from samsungtvws.async_rest import SamsungTVAsyncRest
             except ImportError as err:
                 raise AdapterConnectionError(
-                    "samsungtvws library not installed. The integration "
-                    "manifest should declare it as a requirement."
+                    "samsungtvws library not installed."
                 ) from err
 
-            # REST client first — no auth, used for power state + device info.
-            # Note: REST runs on port 8001 (not 8002).
-            try:
-                # samsungtvws 2.7.2 takes a session_factory or uses a default.
-                import aiohttp
-                session = aiohttp.ClientSession()
-                self._rest = SamsungTVAsyncRest(host=self._host, session=session)
-            except Exception as err:  # noqa: BLE001
-                self._rest = None
-                _LOGGER.debug("REST client init failed: %s", err)
-                # Not fatal — we can still send commands over WS without REST.
+            if not self._token:
+                raise AdapterAuthError(
+                    "Samsung token missing — pair the TV via the config flow"
+                )
 
-            # WebSocket remote — first time triggers the popup on the TV.
-            # Use 31s timeout for initial pairing (gives user time to accept).
-            # Subsequent connects use the saved token and are fast.
-            timeout = 31 if not self._token else 10
             try:
                 self._remote = SamsungTVWSAsyncRemote(
                     host=self._host,
                     port=8002,
                     token=self._token,
                     name=self._name,
-                    timeout=timeout,
+                    timeout=5,
                 )
-                await self._remote.start_listening()
+                # start_listening keeps the websocket alive between commands.
+                # The callback receives every event from the TV.
+                await self._remote.start_listening(self._on_ws_event)
             except Exception as err:  # noqa: BLE001
                 self._remote = None
                 err_name = type(err).__name__
-                err_msg = str(err)
-                # Common error types in samsungtvws:
-                #   - UnauthorizedError: user clicked "deny" on the TV
-                #   - ConnectionFailure: network unreachable / TV off
-                #   - ConnectionClosedError: socket dropped mid-handshake
-                if "Unauthorized" in err_name or "Unauthorized" in err_msg:
+                msg = str(err)
+                if "Unauthorized" in err_name or "Unauthorized" in msg:
                     raise AdapterAuthError(
-                        "Samsung TV refused the token — accept the prompt "
-                        "on the TV and re-pair via the config flow."
+                        "Samsung TV refused the token — re-pair via the "
+                        "config flow."
                     ) from err
                 raise AdapterConnectionError(
                     f"Unable to connect to Samsung TV: {err_name}: {err}"
                 ) from err
 
-            # If pairing produced a new token, capture it for persistence.
+            # The TV may have issued a fresh token on reconnect.
             new_token = getattr(self._remote, "token", None)
             if new_token and new_token != self._token:
                 self._token = new_token
                 self._state.extra_attributes["token"] = new_token
-                _LOGGER.info("Samsung pairing succeeded — new token captured")
 
             self._state.available = True
+            self._state.powered_on = True  # if WS opened, TV is on
             self._notify()
 
-            # Start the polling loop.
-            if self._poll_task is None or self._poll_task.done():
-                self._poll_task = asyncio.create_task(self._poll_loop())
+            # Keepalive — periodically verify is_alive and reconnect if needed.
+            if self._keepalive_task is None or self._keepalive_task.done():
+                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
-            # Trigger an initial app-list fetch.
+            # Build the source list.
             asyncio.create_task(self._refresh_app_list())
+
+    def _on_ws_event(self, event: Any, response: Any) -> None:
+        """Callback from samsungtvws — fires for every TV event."""
+        try:
+            if self._remote is not None:
+                new_token = getattr(self._remote, "token", None)
+                if new_token and new_token != self._token:
+                    _LOGGER.debug("Samsung token rotated; updating cached token")
+                    self._token = new_token
+                    self._state.extra_attributes["token"] = new_token
+                    self._notify()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def disconnect(self) -> None:
         async with self._connect_lock:
-            if self._poll_task and not self._poll_task.done():
-                self._poll_task.cancel()
-                self._poll_task = None
+            if self._keepalive_task and not self._keepalive_task.done():
+                self._keepalive_task.cancel()
+                self._keepalive_task = None
             if self._remote is not None:
                 try:
                     await self._remote.close()
                 except Exception:  # noqa: BLE001
                     pass
                 self._remote = None
-            if self._rest is not None:
-                # SamsungTVAsyncRest holds a session we created — close it.
-                try:
-                    session = getattr(self._rest, "_session", None)
-                    if session is not None:
-                        await session.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._rest = None
             self._state.available = False
             self._notify()
 
-    # ----- Polling -----
+    # ----- Keepalive -----
 
-    async def _poll_loop(self) -> None:
-        """Poll the REST endpoint for power state every POLL_INTERVAL_SECONDS.
-
-        We do this because samsungtvws doesn't push updates. If the TV goes
-        off, the WS is dropped here too so the next command forces a fresh
-        connect.
-        """
+    async def _keepalive_loop(self) -> None:
+        """Light keepalive — verifies the websocket is alive periodically."""
         try:
             while True:
-                await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
-                try:
-                    await self._poll_once()
-                except Exception:  # noqa: BLE001
-                    _LOGGER.debug(
-                        "Samsung poll iteration failed; continuing",
-                        exc_info=True,
-                    )
+                await asyncio.sleep(self.KEEPALIVE_INTERVAL_SECONDS)
+                alive = await self._is_alive_safe()
+                if alive:
+                    if not self._state.available:
+                        self._state.available = True
+                        self._state.powered_on = True
+                        self._notify()
+                else:
+                    if self._state.available:
+                        _LOGGER.debug(
+                            "Samsung websocket no longer alive — marking off"
+                        )
+                    self._state.available = False
+                    self._state.powered_on = False
+                    self._notify()
+                    if self._remote is not None:
+                        try:
+                            await self._remote.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._remote = None
         except asyncio.CancelledError:
             return
 
-    async def _poll_once(self) -> None:
-        if self._rest is None:
-            return
+    async def _is_alive_safe(self) -> bool:
+        """Wrap is_alive() defensively."""
+        if self._remote is None:
+            return False
         try:
-            info = await self._rest.rest_device_info()
-        except Exception as err:  # noqa: BLE001
-            # TV likely off/unreachable. Mark unavailable.
-            if self._state.available:
-                _LOGGER.debug("Samsung REST unreachable (%s) — marking off", err)
-            self._state.available = False
-            self._state.powered_on = False
-            if self._remote is not None:
-                try:
-                    await self._remote.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._remote = None
-            self._notify()
-            return
-
-        # rest_device_info returns a dict. Power signal varies by firmware;
-        # we use PowerState if present, otherwise treat any successful
-        # response as "on" (the REST endpoint is itself disabled in standby).
-        device = info.get("device", {}) if isinstance(info, dict) else {}
-        powered_on = device.get("PowerState", "").lower() == "on"
-        if not powered_on and info:
-            powered_on = True
-
-        self._state.available = True
-        self._state.powered_on = powered_on
-        self._notify()
+            method = getattr(self._remote, "is_alive", None)
+            if method is None:
+                return True  # older versions, optimistic
+            result = method()
+            if asyncio.iscoroutine(result):
+                result = await result
+            return bool(result)
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _refresh_app_list(self) -> None:
-        """Try to fetch installed apps via WebSocket. Fall back to hardcoded.
-
-        Many 2024+ Tizen monitors/Frame TVs silently ignore the WS app_list
-        request — they respond ms.channel.connect but never the followup
-        installedApp.get. We give it a short timeout and fall back gracefully.
-        """
-        new_map: dict[str, str] = {}
+        """Build the source map. Always seeded from hardcoded; WS list
+        replaces it when available."""
+        new_map: dict[str, str] = dict(_HARDCODED_APPS)
 
         if self._remote is not None:
             try:
-                # app_list() in samsungtvws 2.7 returns list of dicts.
-                # Wrap in timeout because some TVs never respond.
                 apps = await asyncio.wait_for(
-                    self._remote.app_list(), timeout=10.0
+                    self._remote.app_list(), timeout=8.0
                 )
+                ws_map: dict[str, str] = {}
                 for app in apps or []:
                     if isinstance(app, dict):
                         name = app.get("name")
                         app_id = app.get("appId") or app.get("app_id")
                         if name and app_id:
-                            new_map[str(name)] = str(app_id)
-                if new_map:
+                            ws_map[str(name)] = str(app_id)
+                if ws_map:
                     _LOGGER.info(
-                        "Samsung TV reported %d apps via WS", len(new_map)
+                        "Samsung TV reported %d apps via WS — using WS list",
+                        len(ws_map),
                     )
+                    new_map = ws_map
             except asyncio.TimeoutError:
                 _LOGGER.info(
-                    "Samsung WS app_list timed out — using hardcoded list"
+                    "Samsung WS app_list timed out — using hardcoded list (%d entries)",
+                    len(new_map),
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "Samsung WS app_list failed (%s); using hardcoded list",
                     err,
                 )
-
-        if not new_map:
-            new_map = dict(_HARDCODED_APPS)
+        else:
             _LOGGER.info(
                 "Samsung TV source list set from hardcoded apps (%d entries)",
                 len(new_map),
@@ -357,7 +340,6 @@ class SamsungTizenAdapter(RemoteAdapter):
 
         self._source_map = new_map
 
-        # Apply user filter to the visible source_list (keep _source_map full).
         allowed = self._config.get("allowed_sources")
         if isinstance(allowed, list) and allowed:
             visible = {k: v for k, v in new_map.items() if k in allowed}
@@ -373,13 +355,59 @@ class SamsungTizenAdapter(RemoteAdapter):
 
         self._notify()
 
-    # ----- Commands -----
+    # ----- Sending commands -----
+
+    async def _send_key(self, key: str) -> None:
+        """Send a Tizen KEY_xxx via the typed-command API.
+
+        Critical: uses `send_commands([SendRemoteKey.click(...)])` rather
+        than `send_command(string)` because the latter has issues reusing
+        the paired session in samsungtvws 2.7.x — it often raises
+        ConnectionClosedError on second use.
+        """
+        try:
+            from samsungtvws.remote import SendRemoteKey
+        except ImportError as err:
+            raise AdapterConnectionError(
+                f"samsungtvws missing SendRemoteKey: {err}"
+            ) from err
+
+        await self._ensure_connected()
+
+        cmd = SendRemoteKey.click(key)
+        try:
+            await self._remote.send_commands([cmd])
+            _LOGGER.debug("Samsung sent %s", key)
+        except Exception as err:  # noqa: BLE001
+            err_name = type(err).__name__
+            _LOGGER.debug(
+                "Samsung send_commands(%s) failed: %s: %s — reconnecting",
+                key, err_name, err,
+            )
+            await self._reset_remote()
+            try:
+                await self._ensure_connected()
+                await self._remote.send_commands([cmd])
+                _LOGGER.debug("Samsung sent %s (after reconnect)", key)
+            except Exception as err2:  # noqa: BLE001
+                await self._reset_remote()
+                raise AdapterConnectionError(
+                    f"send {key} failed even after reconnect: "
+                    f"{type(err2).__name__}: {err2}"
+                ) from err2
+
+    # ----- Commands (public API) -----
 
     async def press_button(self, button: str) -> None:
         if button == Button.POWER:
-            # Probe live REST endpoint to decide direction.
-            live = await self._is_rest_alive()
-            _LOGGER.debug("Samsung POWER toggle: rest_alive=%s -> %s",
+            live = await self._is_alive_safe()
+            if not live:
+                try:
+                    await asyncio.wait_for(self._ensure_connected(), timeout=4.0)
+                    live = await self._is_alive_safe()
+                except Exception:  # noqa: BLE001
+                    live = False
+            _LOGGER.debug("Samsung POWER toggle: ws_alive=%s -> %s",
                           live, "turn_off" if live else "turn_on")
             if live:
                 await self.turn_off()
@@ -400,23 +428,10 @@ class SamsungTizenAdapter(RemoteAdapter):
                 f"Samsung adapter does not support button {button!r}"
             )
 
-        await self._ensure_connected()
-        try:
-            await self._remote.send_command(key)
-        except Exception as err:  # noqa: BLE001
-            # Connection may have died — drop client so next press reconnects.
-            await self._reset_remote()
-            raise AdapterConnectionError(
-                f"send_command({key}) failed: {type(err).__name__}: {err}"
-            ) from err
+        await self._send_key(key)
 
     async def turn_on(self) -> None:
-        """Wake the TV via Wake-on-LAN.
-
-        Samsung Tizen TVs in standby answer magic packets. Two packets ~250ms
-        apart matches what the official Samsung integration does (some
-        OLEDs need the second packet).
-        """
+        """Wake the TV via Wake-on-LAN."""
         if not self._mac:
             raise AdapterConnectionError(
                 "No MAC address configured — Wake-on-LAN unavailable"
@@ -437,7 +452,6 @@ class SamsungTizenAdapter(RemoteAdapter):
                 "wake_on_lan", "send_magic_packet", {"mac": self._mac}
             )
             _LOGGER.info("Samsung WoL packets sent to %s", self._mac)
-            # Optimistically mark on; next poll will correct if wrong.
             self._state.powered_on = True
             self._notify()
         except Exception as err:  # noqa: BLE001
@@ -446,19 +460,13 @@ class SamsungTizenAdapter(RemoteAdapter):
             ) from err
 
     async def turn_off(self) -> None:
-        """Send KEY_POWER which puts the TV into standby.
-
-        This is a terminal command — the TV will close the websocket as
-        it goes to standby. Don't treat the connection drop as an error.
-        """
-        await self._ensure_connected()
+        """Send KEY_POWER (terminal — TV closes the websocket)."""
         try:
-            await self._remote.send_command("KEY_POWER")
+            await self._send_key("KEY_POWER")
             _LOGGER.debug("Samsung KEY_POWER sent for standby")
         except Exception as err:  # noqa: BLE001
-            # Expected during shutdown.
             _LOGGER.debug(
-                "turn_off: exception (expected during shutdown): %s", err
+                "turn_off: send exception (expected during shutdown): %s", err
             )
 
         self._state.powered_on = False
@@ -473,13 +481,9 @@ class SamsungTizenAdapter(RemoteAdapter):
         await self.press_button(Button.VOL_DOWN)
 
     async def mute(self, muted: bool) -> None:
-        # Samsung KEY_MUTE is a toggle, not absolute. We don't know the
-        # current state from the WS, so we just send the key.
         await self.press_button(Button.MUTE)
 
     async def set_volume(self, level: float) -> None:
-        # Tizen WS doesn't expose absolute volume on consumer TVs. The user
-        # should use VOL_UP/VOL_DOWN.
         raise UnsupportedButtonError(
             "Samsung adapter doesn't support absolute volume — use "
             "VOL_UP/VOL_DOWN buttons instead."
@@ -497,9 +501,18 @@ class SamsungTizenAdapter(RemoteAdapter):
             )
         except Exception as err:  # noqa: BLE001
             await self._reset_remote()
-            raise AdapterConnectionError(
-                f"run_app({source!r}) failed: {type(err).__name__}: {err}"
-            ) from err
+            try:
+                await self._ensure_connected()
+                await self._remote.run_app(app_id)
+                _LOGGER.debug(
+                    "Samsung run_app(%s) sent after reconnect", app_id
+                )
+            except Exception as err2:  # noqa: BLE001
+                await self._reset_remote()
+                raise AdapterConnectionError(
+                    f"run_app({source!r}) failed: "
+                    f"{type(err2).__name__}: {err2}"
+                ) from err2
 
     async def play(self) -> None:
         await self.press_button(Button.PLAY)
@@ -513,7 +526,7 @@ class SamsungTizenAdapter(RemoteAdapter):
     # ----- Helpers -----
 
     async def _ensure_connected(self) -> None:
-        if self._remote is None:
+        if self._remote is None or not await self._is_alive_safe():
             await self.connect()
 
     async def _reset_remote(self) -> None:
@@ -524,19 +537,3 @@ class SamsungTizenAdapter(RemoteAdapter):
             except Exception:  # noqa: BLE001
                 pass
             self._remote = None
-
-    async def _is_rest_alive(self) -> bool:
-        """Probe the REST endpoint — alive means TV is on/reachable.
-
-        Doesn't open the websocket so doesn't trigger pairing popups.
-        """
-        if self._rest is None:
-            # No REST client; fall back to checking if we have a live WS.
-            return self._remote is not None
-        try:
-            info = await asyncio.wait_for(
-                self._rest.rest_device_info(), timeout=3.0
-            )
-            return bool(info)
-        except Exception:  # noqa: BLE001
-            return False
