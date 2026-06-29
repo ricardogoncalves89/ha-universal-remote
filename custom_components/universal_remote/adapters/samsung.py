@@ -115,7 +115,16 @@ _BUTTON_MAP: dict[str, str] = {
 
 # Hardcoded fallback. We always seed with this because most 2024+ Smart
 # Monitors silently ignore the WS app_list endpoint.
+#
+# Values starting with "KEY_" are treated as remote keys (sent via
+# SendRemoteKey.click), everything else is treated as an app_id and
+# launched via ChannelEmitCommand.launch_app. This lets us mix
+# native TV functions (like Live TV via the tuner) with app launches
+# in the same source picker.
 _HARDCODED_APPS: dict[str, str] = {
+    # Native TV functions (sent as keys, not app launches)
+    "Live TV":      "KEY_TV",       # switches to the built-in tuner
+    # Streaming apps (sent as app launches)
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
     "Disney+":      "3201901017640",
@@ -319,7 +328,8 @@ class SamsungTizenAdapter(RemoteAdapter):
 
     async def _refresh_app_list(self) -> None:
         """Build the source map. Always seeded from hardcoded; WS list
-        replaces it when available."""
+        replaces app entries when available, but KEY_-prefixed entries
+        (native TV functions like Live TV) are always preserved."""
         new_map: dict[str, str] = dict(_HARDCODED_APPS)
 
         if self._remote is not None:
@@ -339,7 +349,13 @@ class SamsungTizenAdapter(RemoteAdapter):
                         "Samsung TV reported %d apps via WS — using WS list",
                         len(ws_map),
                     )
-                    new_map = ws_map
+                    # Preserve native TV functions (KEY_-prefixed) from the
+                    # hardcoded map; WS only returns apps, never native funcs.
+                    native = {
+                        k: v for k, v in _HARDCODED_APPS.items()
+                        if v.startswith("KEY_")
+                    }
+                    new_map = {**native, **ws_map}
             except asyncio.TimeoutError:
                 _LOGGER.info(
                     "Samsung WS app_list timed out — using hardcoded list (%d entries)",
@@ -534,44 +550,70 @@ class SamsungTizenAdapter(RemoteAdapter):
         )
 
     async def select_source(self, source: str) -> None:
-        app_id = self._source_map.get(source)
-        if not app_id:
+        value = self._source_map.get(source)
+        if not value:
             raise AdapterConnectionError(f"Unknown source {source!r}")
 
         # Probe before attempting — avoids 5s WS timeout when TV is off.
         if not await self._tcp_probe():
             _LOGGER.debug(
-                "Samsung run_app(%s) requested but TV not reachable", app_id
+                "Samsung select_source(%s -> %s) requested but TV not reachable",
+                source, value,
             )
             if self._state.powered_on:
                 self._state.powered_on = False
                 self._notify()
             raise AdapterConnectionError(
-                f"Samsung TV is off — cannot launch {source!r}"
+                f"Samsung TV is off — cannot select {source!r}"
             )
 
         if not self._state.powered_on:
             self._state.powered_on = True
             self._notify()
 
-        await self._ensure_connected()
-        try:
-            await self._remote.run_app(app_id)
+        # Two flavours of source entry:
+        #   * "KEY_xxx"  → send as a remote key (e.g. Live TV via KEY_TV)
+        #   * "<digits>" → launch as a Tizen app (e.g. Netflix bundle ID)
+        if value.startswith("KEY_"):
             _LOGGER.debug(
-                "Samsung run_app(%s) sent for source %r", app_id, source
+                "Samsung select_source(%r) -> sending key %s", source, value
+            )
+            await self._send_key(value)
+            return
+
+        # App launch path.
+        try:
+            from samsungtvws.remote import ChannelEmitCommand
+        except ImportError as err:
+            raise AdapterConnectionError(
+                f"samsungtvws missing ChannelEmitCommand: {err}"
+            ) from err
+
+        await self._ensure_connected()
+
+        cmd = ChannelEmitCommand.launch_app(value)
+        try:
+            await self._remote.send_commands([cmd])
+            _LOGGER.debug(
+                "Samsung launch_app(%s) sent for source %r", value, source
             )
         except Exception as err:  # noqa: BLE001
+            err_name = type(err).__name__
+            _LOGGER.debug(
+                "Samsung launch_app(%s) failed: %s: %s — reconnecting",
+                value, err_name, err,
+            )
             await self._reset_remote()
             try:
                 await self._ensure_connected()
-                await self._remote.run_app(app_id)
+                await self._remote.send_commands([cmd])
                 _LOGGER.debug(
-                    "Samsung run_app(%s) sent after reconnect", app_id
+                    "Samsung launch_app(%s) sent after reconnect", value
                 )
             except Exception as err2:  # noqa: BLE001
                 await self._reset_remote()
                 raise AdapterConnectionError(
-                    f"run_app({source!r}) failed: "
+                    f"launch_app({source!r}) failed: "
                     f"{type(err2).__name__}: {err2}"
                 ) from err2
 
