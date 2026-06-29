@@ -45,6 +45,7 @@ Wake-up:
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from typing import Any
 
@@ -122,15 +123,30 @@ _BUTTON_MAP: dict[str, str] = {
 # native TV functions (like Live TV via the tuner) with app launches
 # in the same source picker.
 _HARDCODED_APPS: dict[str, str] = {
-    # Native TV functions (sent as keys, not app launches).
-    # The official HA samsungtv integration uses exactly these mappings —
-    # KEY_TV switches to the built-in tuner on Tizen TVs. Smart Monitors
-    # *should* respond to it too; if they don't, that's a permission
-    # issue (see _WS_CLIENT_NAME in the adapter class).
+    # Native TV functions — both entries are mapped to remote keys, not
+    # app launches. They give the user two ways to reach the tuner:
+    #
+    #   * "Live TV" -> KEY_TV  is the standard Tizen "go to tuner" code.
+    #     Works on most Samsung TVs but the Smart Monitor TU27F6005 (and
+    #     likely other Smart Monitor models) silently ignores it via WS.
+    #
+    #   * "TV" -> KEY_HDMI  is a deliberate hack exploiting Smart Monitor
+    #     firmware behaviour: sending KEY_HDMI when no HDMI source is
+    #     plugged in causes the TV to briefly try HDMI, find nothing,
+    #     and auto-fall-back to the Live TV tuner. The label "TV" hides
+    #     the implementation detail from the user. Same trick the
+    #     official HA samsungtv integration's "HDMI" entry accidentally
+    #     does on this hardware.
+    #
+    # If you only have ONE HDMI device connected and want HDMI switching
+    # via this hack, you'll need to remove this entry — KEY_HDMI will
+    # cycle to your HDMI device instead of bouncing back to Live TV.
     "Live TV":      "KEY_TV",
-    # Streaming apps (launched via WS ChannelEmitCommand — same path
-    # as the official HA samsungtv integration). If the WS path doesn't
-    # work for your firmware, the REST PUT fallback can be re-enabled.
+    "TV":           "KEY_HDMI",
+    # Streaming apps. Note: WS launch_app is deprecated/broken on Tizen
+    # 2022+ Smart Monitors — these entries are kept for older Tizen TVs
+    # where the WS path still works. For 2024+ Smart Monitors we need a
+    # different launch mechanism (still investigating).
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
     "Disney+":      "3201901017640",
@@ -183,6 +199,18 @@ class SamsungTizenAdapter(RemoteAdapter):
 
         self._remote: Any = None  # SamsungTVWSAsyncRemote
         self._connect_lock = asyncio.Lock()
+
+        # Second WebSocket connection to /api/v2 (NOT samsung.remote.control).
+        # This is the RPC-style channel used for `ms.application.start`,
+        # which is the only reliable way to launch apps on Tizen 2022+ —
+        # the WS `ed.apps.launch` event on the remote.control channel is
+        # silently no-op'd by recent firmwares. ollo69's ha-samsungtv-smart
+        # uses this same channel and is known to work on Smart Monitors.
+        self._control_ws: Any = None  # aiohttp.ClientWebSocketResponse
+        self._control_ws_session: Any = None  # aiohttp.ClientSession
+        self._control_lock = asyncio.Lock()
+        self._control_authorized = asyncio.Event()
+        self._control_reader_task: asyncio.Task | None = None
 
         self._source_map: dict[str, str] = {}
         self.on_source_map_changed = None
@@ -293,6 +321,15 @@ class SamsungTizenAdapter(RemoteAdapter):
             # Keep available=True even on disconnect — the integration is
             # still set up, we just have no live socket right now.
             self._notify()
+
+        # Tear down the secondary /api/v2 channel and its session too.
+        await self._reset_control_channel()
+        if self._control_ws_session is not None:
+            try:
+                await self._control_ws_session.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._control_ws_session = None
 
     # ----- Probe -----
 
@@ -571,21 +608,19 @@ class SamsungTizenAdapter(RemoteAdapter):
     async def select_source(self, source: str) -> None:
         """Open a source — either a Tizen key sequence or a Tizen app.
 
-        Mirrors the official HA samsungtv integration's behaviour:
+        Two code paths:
 
           * Entries that start with "KEY_" are sent as remote keys via the
             same `SendRemoteKey.click(...)` path used for normal buttons.
-            "Live TV" -> "KEY_TV" switches to the built-in tuner.
+            "Live TV" -> "KEY_TV" switches to the built-in tuner. On Smart
+            Monitors that ignore KEY_TV, "TV" -> "KEY_HDMI" exploits the
+            no-HDMI-fallback quirk to land on the tuner.
 
           * Everything else is treated as a Tizen app ID and launched via
-            the WS `ed.apps.launch` event (ChannelEmitCommand.launch_app).
-            Same code path the official integration uses.
-
-        If the WS app launch silently no-ops on your firmware (Samsung
-        deprecated `ed.apps.launch` on some Tizen 2022+ builds), and the
-        permission hypothesis from `_WS_CLIENT_NAME` doesn't resolve it,
-        we fall back to a REST PUT (commented-out below — re-enable if
-        needed).
+            the secondary `/api/v2` channel using `ms.application.start`.
+            We deliberately do NOT use the deprecated WS `ed.apps.launch`
+            event on `samsung.remote.control` — Samsung silently no-op'd
+            that on Tizen 2022+, leading to "success" with no effect.
         """
         value = self._source_map.get(source)
         if not value:
@@ -616,37 +651,34 @@ class SamsungTizenAdapter(RemoteAdapter):
             await self._send_key(value)
             return
 
-        # App launch via WebSocket (same as official HA samsungtv).
+        # App launch via the secondary /api/v2 channel using
+        # `ms.application.start`. This is the non-deprecated path —
+        # confirmed working on Tizen 2022+ Smart Monitors. See
+        # `_ensure_control_channel` for the channel rationale.
         try:
-            from samsungtvws.remote import ChannelEmitCommand
-        except ImportError as err:
-            raise AdapterConnectionError(
-                f"samsungtvws missing ChannelEmitCommand: {err}"
-            ) from err
-
-        await self._ensure_connected()
-
-        cmd = ChannelEmitCommand.launch_app(value)
-        try:
-            await self._remote.send_commands([cmd])
+            await self._launch_app_via_control(value)
             _LOGGER.debug(
-                "Samsung launch_app(%s) sent for source %r", value, source
+                "Samsung ms.application.start(%s) sent for source %r",
+                value, source,
             )
+        except AdapterConnectionError:
+            raise
         except Exception as err:  # noqa: BLE001
             err_name = type(err).__name__
             _LOGGER.debug(
-                "Samsung launch_app(%s) failed: %s: %s — reconnecting",
+                "Samsung control-channel launch_app(%s) failed: %s: %s — "
+                "resetting and retrying once",
                 value, err_name, err,
             )
-            await self._reset_remote()
+            await self._reset_control_channel()
             try:
-                await self._ensure_connected()
-                await self._remote.send_commands([cmd])
+                await self._launch_app_via_control(value)
                 _LOGGER.debug(
-                    "Samsung launch_app(%s) sent after reconnect", value
+                    "Samsung ms.application.start(%s) sent after reconnect",
+                    value,
                 )
             except Exception as err2:  # noqa: BLE001
-                await self._reset_remote()
+                await self._reset_control_channel()
                 raise AdapterConnectionError(
                     f"launch_app({source!r}) failed: "
                     f"{type(err2).__name__}: {err2}"
@@ -675,3 +707,165 @@ class SamsungTizenAdapter(RemoteAdapter):
             except Exception:  # noqa: BLE001
                 pass
             self._remote = None
+
+    # ----- Secondary /api/v2 channel for app control -----
+    #
+    # This is a separate WS endpoint from the standard remote.control
+    # channel. We use it for `ms.application.start` since the WS
+    # `ed.apps.launch` event on the remote.control channel is deprecated
+    # and silently no-op'd on Tizen 2022+. Pattern lifted from
+    # caphm/tizenws and ollo69/ha-samsungtv-smart.
+
+    async def _ensure_control_channel(self) -> None:
+        """Open (or re-open) the /api/v2 RPC channel.
+
+        Idempotent. Holds `_control_lock` for the duration so we never
+        end up with two parallel sessions.
+        """
+        async with self._control_lock:
+            if (
+                self._control_ws is not None
+                and not self._control_ws.closed
+            ):
+                return
+
+            try:
+                import aiohttp
+            except ImportError as err:
+                raise AdapterConnectionError(
+                    f"aiohttp not available for control channel: {err}"
+                ) from err
+
+            if (
+                self._control_ws_session is None
+                or self._control_ws_session.closed
+            ):
+                self._control_ws_session = aiohttp.ClientSession()
+
+            name_b64 = base64.b64encode(
+                self._WS_CLIENT_NAME.encode("utf-8")
+            ).decode("utf-8")
+            url = f"wss://{self._host}:8002/api/v2?name={name_b64}"
+
+            # Samsung TVs use self-signed certs — disable SSL verification.
+            # Note: this channel doesn't use a token. Permission carries
+            # over from the remote.control pairing on the same device.
+            self._control_authorized.clear()
+            try:
+                self._control_ws = await asyncio.wait_for(
+                    self._control_ws_session.ws_connect(url, ssl=False),
+                    timeout=5.0,
+                )
+            except Exception as err:  # noqa: BLE001
+                err_name = type(err).__name__
+                raise AdapterConnectionError(
+                    f"Could not open Samsung control channel: "
+                    f"{err_name}: {err}"
+                ) from err
+
+            # Spawn a background reader so we drain incoming events
+            # (mostly ms.channel.connect on open, then RPC responses).
+            self._control_reader_task = asyncio.create_task(
+                self._control_reader_loop()
+            )
+
+            # Wait briefly for ms.channel.connect — confirms the TV
+            # accepted us on this channel. Move on if it doesn't show up;
+            # the TV usually still accepts commands.
+            try:
+                await asyncio.wait_for(
+                    self._control_authorized.wait(), timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.debug(
+                    "Samsung control channel opened but no "
+                    "ms.channel.connect received within 3s — proceeding"
+                )
+
+    async def _control_reader_loop(self) -> None:
+        """Background reader for the /api/v2 channel.
+
+        Updates `_control_authorized` and logs incoming events. We do
+        not act on individual RPC responses for now — launching an app
+        is fire-and-forget from our perspective.
+        """
+        try:
+            import aiohttp
+        except ImportError:
+            return
+        ws = self._control_ws
+        if ws is None:
+            return
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        payload = msg.json()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug(
+                            "Samsung control_ws non-JSON: %s", msg.data
+                        )
+                        continue
+                    event = payload.get("event")
+                    if event == "ms.channel.connect":
+                        _LOGGER.debug(
+                            "Samsung control channel authorized"
+                        )
+                        self._control_authorized.set()
+                    elif event == "ms.channel.unauthorized":
+                        _LOGGER.warning(
+                            "Samsung control channel: unauthorized"
+                        )
+                        break
+                    else:
+                        _LOGGER.debug(
+                            "Samsung control_ws event/response: %s",
+                            str(payload)[:200],
+                        )
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Samsung control_ws reader stopped: %s: %s",
+                type(err).__name__, err,
+            )
+
+    async def _launch_app_via_control(self, app_id: str) -> None:
+        """Launch an app via `ms.application.start` on /api/v2.
+
+        Raises AdapterConnectionError if the channel can't be opened or
+        the send fails.
+        """
+        await self._ensure_control_channel()
+        if self._control_ws is None or self._control_ws.closed:
+            raise AdapterConnectionError(
+                "Samsung control channel not open after ensure"
+            )
+        payload = {
+            "id": app_id,
+            "method": "ms.application.start",
+            "params": {"id": app_id},
+        }
+        await self._control_ws.send_json(payload)
+
+    async def _reset_control_channel(self) -> None:
+        """Tear down the /api/v2 channel so the next call reopens fresh."""
+        if self._control_reader_task is not None:
+            self._control_reader_task.cancel()
+            try:
+                await self._control_reader_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._control_reader_task = None
+        if self._control_ws is not None:
+            try:
+                await self._control_ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._control_ws = None
+        self._control_authorized.clear()
