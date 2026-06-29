@@ -1,5 +1,5 @@
 /**
- * Universal Remote Card v0.6.0
+ * Universal Remote Card v0.6.1
  *
  * Physical-remote-style Lovelace card for the Universal Remote
  * Home Assistant integration. Mobile-first, light/dark themed.
@@ -897,16 +897,33 @@ customElements.define("universal-remote-card", UniversalRemoteCard);
 // =================================================================
 
 class UniversalRemoteCardEditor extends HTMLElement {
+    constructor() {
+        super();
+        // Default to {} so accessing this._config.remotes never throws
+        // even if a render is somehow triggered before setConfig.
+        this._config = {};
+        this._initialized = false;
+    }
+
     setConfig(config) {
+        // HA's call order is not guaranteed: sometimes setConfig
+        // runs before `hass`, sometimes after. We only do the initial
+        // full render once both have arrived.
         this._config = { ...config };
-        if (this.shadowRoot) this._renderContent();
+        this._initialized = true;
+        if (this._hass && !this.shadowRoot) {
+            this._render();
+        }
     }
 
     set hass(hass) {
         this._hass = hass;
-        if (!this._rendered) {
+        if (!this._initialized) {
+            // Wait for setConfig — without it we have nothing to render.
+            return;
+        }
+        if (!this.shadowRoot) {
             this._render();
-            this._rendered = true;
         } else {
             this._refreshPickersHass();
         }
@@ -1289,7 +1306,7 @@ window.customCards.push({
 });
 
 console.info(
-    "%c UNIVERSAL-REMOTE-CARD %c v0.6.0 ",
+    "%c UNIVERSAL-REMOTE-CARD %c v0.6.1 ",
     "color: white; background: #d8454a; padding: 2px 4px; border-radius: 3px 0 0 3px;",
     "color: white; background: #444; padding: 2px 4px; border-radius: 0 3px 3px 0;",
 );
