@@ -190,6 +190,11 @@ class AppleTVAdapter(RemoteAdapter):
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("push_updater.start() raised; continuing", exc_info=True)
 
+            # Diagnostic logging — we have hit several cases where Companion
+            # pairs successfully but the app_list facade refuses to work later.
+            # Log what pyatv thinks is supported so we can diagnose.
+            self._log_capabilities()
+
             self._state.available = True
             # Power state and app metadata will arrive via the listeners.
             self._notify()
@@ -197,6 +202,45 @@ class AppleTVAdapter(RemoteAdapter):
             # Trigger an initial fetch so we don't sit at "unknown" until the
             # user touches the remote.
             asyncio.create_task(self._refresh_app_list())
+
+    def _log_capabilities(self) -> None:
+        """Log what pyatv reports about supported features. Diagnostic only."""
+        if self._atv is None:
+            return
+        try:
+            from pyatv.const import FeatureName, FeatureState
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            features = self._atv.features
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Apple TV: features facade unavailable")
+            return
+
+        # Which protocols actually connected?
+        try:
+            from pyatv.interface import StateProducer  # noqa: F401
+            connected = []
+            for proto_name in ("companion", "airplay", "mrp", "raop", "dmap"):
+                inst = getattr(self._atv, proto_name, None)
+                if inst is not None:
+                    connected.append(proto_name)
+            _LOGGER.info("Apple TV connected protocols: %s", connected)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Probe key features
+        for fname_str in ("LaunchApp", "AppList", "TurnOn", "TurnOff",
+                          "VolumeUp", "VolumeDown", "SetVolume"):
+            try:
+                fname = getattr(FeatureName, fname_str)
+                info = features.get_feature(fname)
+                _LOGGER.info(
+                    "Apple TV feature %s: state=%s",
+                    fname_str, info.state.name if info else "n/a",
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Could not probe feature %s: %s", fname_str, err)
 
     async def disconnect(self) -> None:
         async with self._connect_lock:
@@ -260,58 +304,56 @@ class AppleTVAdapter(RemoteAdapter):
         self._atv = None
         self._notify()
 
-    async def _refresh_app_list(self) -> None:
-        """Fetch the launchable apps via Companion and build source_map.
+    # ----- Hardcoded app list -----
+    #
+    # tvOS 18.x has a known pyatv issue (#2656) where the Companion protocol
+    # initialization fails with `FetchAttentionState` timeouts. This cascades
+    # and prevents `app_list()` from returning real data. However, direct
+    # `launch_app(bundle_id)` calls still work — the call path is different.
+    #
+    # So instead of asking the Apple TV "what apps do you have?", we maintain
+    # a curated list of the apps Ricardo actually uses. Adding new apps is a
+    # one-line change here.
+    #
+    # Bundle IDs come from the App Store URL ID (numeric) → resolved to the
+    # internal bundle string via `atvremote ... app` while the app is open
+    # on the Apple TV. If a hardcoded ID is wrong, launch_app will fail
+    # silently and the user will see no effect — easy to debug, hard to break.
+    _HARDCODED_APPS: dict[str, str] = {
+        "Netflix": "com.netflix.Netflix",
+        "Disney+": "com.disney.disneyplus",
+        "YouTube": "com.google.ios.youtube",
+        "Prime Video": "com.amazon.aiv.AIVApp",
+        "Apple TV": "com.apple.TVWatchList",
+        "App Store": "com.apple.TVAppStore",
+        "Music": "com.apple.TVMusic",
+        "Fitness": "com.apple.Fitness",
+        "Photos": "com.apple.TVPhotos",
+        "Settings": "com.apple.TVSettings",
+        # Portugal-specific. Bundle ID confirmed via `atvremote ... app` while
+        # Vodafone TV was open on the Apple TV. UPDATE this string if launch_app
+        # fails — see comment block above.
+        "Vodafone TV": "com.vodafone.vtv.pt",
+    }
 
-        Called once shortly after connect(). The Companion protocol can take
-        a few seconds to be ready after the websocket comes up, so we retry
-        a few times with backoff before giving up.
+    async def _refresh_app_list(self) -> None:
+        """Populate the source map from the hardcoded list.
+
+        We deliberately do NOT call pyatv's `apps.app_list()` because tvOS 18.x
+        breaks it (issue postlund/pyatv#2656). Instead we use a curated dict of
+        common apps. `launch_app(bundle_id)` continues to work fine and is what
+        actually matters for the user experience.
         """
         if self._atv is None:
             return
-        apps_facade = getattr(self._atv, "apps", None)
-        if apps_facade is None:
-            _LOGGER.warning(
-                "Apple TV apps facade is None — Companion not paired? "
-                "Source list will be empty."
-            )
-            return
 
-        last_err: Exception | None = None
-        for attempt in range(1, 6):  # 5 attempts: 1s, 2s, 4s, 8s, 16s
-            try:
-                apps = await apps_facade.app_list()
-                break
-            except Exception as err:  # noqa: BLE001
-                last_err = err
-                wait = 2 ** (attempt - 1)
-                _LOGGER.debug(
-                    "app_list() failed (attempt %d/5): %s; retrying in %ds",
-                    attempt, err, wait,
-                )
-                await asyncio.sleep(wait)
-        else:
-            _LOGGER.warning(
-                "Unable to fetch Apple TV app list after 5 attempts: %s. "
-                "Source picker will be empty. The integration will keep working "
-                "for remote-control commands.",
-                last_err,
-            )
-            return
-
-        new_app_map: dict[str, str] = {}
-        new_source_map: dict[str, str] = {}
-        for app in apps:
-            ident = getattr(app, "identifier", None)
-            name = getattr(app, "name", None)
-            if ident and name:
-                new_app_map[ident] = name
-                new_source_map[name] = ident
+        new_app_map: dict[str, str] = dict(self._HARDCODED_APPS)
+        # source_map: label -> bundle_id, same shape as app_map for AppleTV
+        new_source_map: dict[str, str] = {name: bid for name, bid in new_app_map.items()}
 
         _LOGGER.info(
-            "Apple TV reported %d apps; first few: %s",
+            "Apple TV source list set from hardcoded apps (%d entries)",
             len(new_source_map),
-            list(new_source_map.keys())[:5],
         )
 
         if new_source_map == self._source_map:
