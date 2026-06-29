@@ -364,15 +364,28 @@ class AppleTVAdapter(RemoteAdapter):
         # keep the full _source_map intact for the options flow.
         allowed = self._config.get("allowed_sources")
         if isinstance(allowed, list) and allowed:
-            visible = {k: v for k, v in new_source_map.items() if k in allowed}
+            # Preserve the user's chosen order — iterate `allowed`
+            # (not new_source_map). Drop entries that aren't in the
+            # live map.
+            visible = {
+                k: new_source_map[k] for k in allowed if k in new_source_map
+            }
         else:
+            # No user filter — show all sources in the order they were
+            # discovered (typically insertion order from the device's
+            # app list response).
             visible = new_source_map
-        self._state.source_list = sorted(visible.keys())
+        # IMPORTANT: do NOT sort. Python dicts preserve insertion order,
+        # so the source_list reflects either the user's chosen order
+        # (from allowed_sources) or the device's natural order.
+        self._state.source_list = list(visible.keys())
 
         # Persist for the options flow.
         if self.on_source_map_changed is not None:
             try:
-                self.on_source_map_changed(sorted(new_source_map.keys()))
+                # Persist the FULL known set in its natural order so the
+                # OptionsFlow shows entries in a stable order across reloads.
+                self.on_source_map_changed(list(new_source_map.keys()))
             except Exception:  # noqa: BLE001
                 pass
 

@@ -274,7 +274,9 @@ class LGWebOSAdapter(RemoteAdapter):
         # re-writing the same thing every callback (the TV sends updates often).
         if new_keys != previous_keys and self.on_source_map_changed is not None:
             try:
-                self.on_source_map_changed(sorted(new_keys))
+                # Persist in natural (insertion) order — inputs first, then
+                # apps as the TV reported them. Stable across reloads.
+                self.on_source_map_changed(list(source_map.keys()))
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("Source map persister raised; ignoring", exc_info=True)
 
@@ -282,10 +284,14 @@ class LGWebOSAdapter(RemoteAdapter):
         # Empty/missing allow-list => show everything (first-time UX).
         allowed = self._config.get("allowed_sources")
         if isinstance(allowed, list) and allowed:
-            visible = {k: v for k, v in source_map.items() if k in allowed}
+            # Preserve the user's chosen order — iterate `allowed`
+            # (not source_map). Drop entries that aren't in the live map.
+            visible = {k: source_map[k] for k in allowed if k in source_map}
         else:
+            # No filter — natural order (inputs first, then apps).
             visible = source_map
-        s.source_list = sorted(visible.keys())
+        # IMPORTANT: do NOT sort. Dicts preserve insertion order.
+        s.source_list = list(visible.keys())
 
         # Determine current source label from current_app_id. Use the full
         # source_map (not the filter) — we want to report the truth even if
