@@ -123,8 +123,9 @@ _BUTTON_MAP: dict[str, str] = {
 # in the same source picker.
 _HARDCODED_APPS: dict[str, str] = {
     # Native TV functions (sent as keys, not app launches)
-    "Live TV":      "KEY_TV",       # switches to the built-in tuner
-    # Streaming apps (sent as app launches)
+    "Live TV":      "KEY_TV",       # standard — analog/digital tuner switch
+    "Live TV (DTV)": "KEY_DTV",     # alternative — try this if Live TV doesn't switch
+    # Streaming apps (sent as app launches via NATIVE_LAUNCH)
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
     "Disney+":      "3201901017640",
@@ -591,7 +592,7 @@ class SamsungTizenAdapter(RemoteAdapter):
 
         await self._ensure_connected()
 
-        cmd = ChannelEmitCommand.launch_app(value)
+        cmd = ChannelEmitCommand.launch_app(value, app_type="NATIVE_LAUNCH")
         try:
             await self._remote.send_commands([cmd])
             _LOGGER.debug(
