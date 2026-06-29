@@ -546,7 +546,10 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
         #    always shown as already-selected, even if the TV is off).
         live: list[str] = []
         if coordinator is not None:
-            live = sorted(getattr(coordinator.adapter, "_source_map", {}).keys())
+            # Preserve the adapter's natural order — do NOT sort
+            # alphabetically. This means sources show up in the order
+            # declared in _HARDCODED_APPS (or as reported by the device).
+            live = list(getattr(coordinator.adapter, "_source_map", {}).keys())
 
         persisted = self._entry.options.get("known_sources", [])
         if not isinstance(persisted, list):
@@ -568,11 +571,16 @@ class UniversalRemoteOptionsFlow(config_entries.OptionsFlow):
         live = [str(x) for x in live if x]
         persisted = [str(x) for x in persisted if x]
         current = [str(x) for x in current if x]
-        # Union of all three so:
-        #   - everything the TV currently reports is selectable,
-        #   - sources reported in past sessions stay selectable across reloads,
-        #   - the user's saved selection is always visible (and pre-checked).
-        choices = sorted(set(live) | set(persisted) | set(current))
+        # Build the checkbox list preserving order, NOT alphabetically.
+        # Priority: live (current adapter order) > current (user's saved
+        # selection) > persisted (extras from past sessions). Dedupe
+        # while keeping first-seen order.
+        seen: set[str] = set()
+        choices: list[str] = []
+        for src in live + current + persisted:
+            if src and src not in seen:
+                seen.add(src)
+                choices.append(src)
 
         if not choices:
             # No sources to choose from yet. Show an empty schema with only

@@ -123,30 +123,25 @@ _BUTTON_MAP: dict[str, str] = {
 # native TV functions (like Live TV via the tuner) with app launches
 # in the same source picker.
 _HARDCODED_APPS: dict[str, str] = {
-    # Native TV functions — both entries are mapped to remote keys, not
-    # app launches. They give the user two ways to reach the tuner:
+    # Native TV functions — sent as remote keys, not app launches.
     #
-    #   * "Live TV" -> KEY_TV  is the standard Tizen "go to tuner" code.
-    #     Works on most Samsung TVs but the Smart Monitor TU27F6005 (and
-    #     likely other Smart Monitor models) silently ignores it via WS.
+    #   * "Live TV" -> KEY_SOURCE  opens the on-screen source picker.
+    #     KEY_TV would be the standard "go to tuner" code, but the Smart
+    #     Monitor TU27F6005 silently ignores it via WS. KEY_SOURCE shows
+    #     the picker and the user navigates from there. Less elegant
+    #     than a one-shot switch but reliable across firmware behaviours.
     #
-    #   * "TV" -> KEY_HDMI  is a deliberate hack exploiting Smart Monitor
-    #     firmware behaviour: sending KEY_HDMI when no HDMI source is
-    #     plugged in causes the TV to briefly try HDMI, find nothing,
-    #     and auto-fall-back to the Live TV tuner. The label "TV" hides
-    #     the implementation detail from the user. Same trick the
-    #     official HA samsungtv integration's "HDMI" entry accidentally
-    #     does on this hardware.
-    #
-    # If you only have ONE HDMI device connected and want HDMI switching
-    # via this hack, you'll need to remove this entry — KEY_HDMI will
-    # cycle to your HDMI device instead of bouncing back to Live TV.
-    "Live TV":      "KEY_TV",
-    "TV":           "KEY_HDMI",
-    # Streaming apps. Note: WS launch_app is deprecated/broken on Tizen
-    # 2022+ Smart Monitors — these entries are kept for older Tizen TVs
-    # where the WS path still works. For 2024+ Smart Monitors we need a
-    # different launch mechanism (still investigating).
+    #   * "HDMI" -> KEY_HDMI  cycles through HDMI inputs (or, on a Smart
+    #     Monitor with no HDMI connected, makes the TV briefly try HDMI
+    #     and fall back to the tuner — a useful quirk if that's what you
+    #     want).
+    "Live TV":      "KEY_SOURCE",
+    "HDMI":         "KEY_HDMI",
+    # Streaming apps — launched via the secondary /api/v2 channel using
+    # `ms.application.start` (see _launch_app_via_control). This is the
+    # path that actually works on Tizen 2022+ Smart Monitors, where the
+    # WS `ed.apps.launch` event on samsung.remote.control is silently
+    # no-op'd by recent firmwares.
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
     "Disney+":      "3201901017640",
@@ -435,14 +430,24 @@ class SamsungTizenAdapter(RemoteAdapter):
 
         allowed = self._config.get("allowed_sources")
         if isinstance(allowed, list) and allowed:
-            visible = {k: v for k, v in new_map.items() if k in allowed}
+            # Preserve the user's chosen order — iterate `allowed`
+            # (not new_map). Drop entries that aren't in the live map.
+            visible = {k: new_map[k] for k in allowed if k in new_map}
         else:
+            # No user filter — show all sources in the order they were
+            # declared (insertion order of _HARDCODED_APPS / TV response).
             visible = new_map
-        self._state.source_list = sorted(visible.keys())
+        # IMPORTANT: do NOT sort. Python dicts preserve insertion order,
+        # so the source_list reflects either the user's chosen order
+        # (from allowed_sources) or the source map's natural order.
+        self._state.source_list = list(visible.keys())
 
         if self.on_source_map_changed is not None:
             try:
-                self.on_source_map_changed(sorted(new_map.keys()))
+                # Persist the FULL known set in its natural order so the
+                # OptionsFlow shows entries in a stable, predictable order
+                # across reloads (not alphabetised).
+                self.on_source_map_changed(list(new_map.keys()))
             except Exception:  # noqa: BLE001
                 pass
 
