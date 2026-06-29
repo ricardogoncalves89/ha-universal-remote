@@ -1,7 +1,6 @@
 """The Universal Remote integration."""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -11,6 +10,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
 
 from .adapters.base import AdapterAuthError, AdapterConnectionError
 from .const import DOMAIN
@@ -26,42 +27,53 @@ _CARD_FILENAME = "universal-remote-card.js"
 _CARD_REGISTERED_KEY = f"{DOMAIN}_card_registered"
 
 
-async def _async_register_card(hass: HomeAssistant) -> None:
-    """Register the Universal Remote Card as a frontend resource.
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the Universal Remote integration.
 
-    Done once per HA boot, regardless of how many config entries exist.
-    The JS file ships inside the integration at frontend/<filename>;
-    we serve it via a static HTTP path and tell the frontend to load
-    it automatically. No user-side resource configuration is needed.
+    HA calls this exactly once at boot per integration (independent of
+    how many config entries the user has), which is the correct place
+    to register the Lovelace card frontend resource. Using
+    ``async_setup_entry`` for this caused two issues with multiple
+    entries:
+
+    * a race condition where parallel entry setups all passed the
+      "already registered" guard and double-registered the route,
+      raising ``RuntimeError: Added route will never be executed``;
+    * the per-entry guard flag check happening between awaits, which
+      isn't atomic across cooperatively-scheduled tasks.
     """
+    await _async_register_card(hass)
+    return True
+
+
+async def _async_register_card(hass: HomeAssistant) -> None:
+    """Register the Universal Remote Card as a frontend resource."""
+    # Defence in depth: even though async_setup runs once, claim the
+    # slot synchronously before any await so any caller race is safe.
     if hass.data.get(_CARD_REGISTERED_KEY):
         return
+    hass.data[_CARD_REGISTERED_KEY] = True
 
     integration_dir = Path(__file__).parent
     js_path = integration_dir / "frontend" / _CARD_FILENAME
 
-    if not js_path.is_file():
+    # Path.is_file() does a stat() syscall — keep it off the loop.
+    if not await hass.async_add_executor_job(js_path.is_file):
         _LOGGER.warning(
             "Universal Remote Card JS not found at %s; card will not be available",
             js_path,
         )
         return
 
-    # Use the integration version as a cache buster so the browser
-    # picks up new releases without manual resource version bumps.
-    manifest_path = integration_dir / "manifest.json"
-    try:
-        version = json.loads(manifest_path.read_text(encoding="utf-8")).get(
-            "version", "0"
-        )
-    except (OSError, ValueError):
-        version = "0"
+    # Use HA's already-parsed integration metadata for the version
+    # instead of reading manifest.json again from the event loop.
+    integration = await async_get_integration(hass, DOMAIN)
+    version = str(integration.version) if integration.version else "0"
 
     await hass.http.async_register_static_paths(
         [StaticPathConfig(_CARD_URL, str(js_path), False)]
     )
     add_extra_js_url(hass, f"{_CARD_URL}?v={version}")
-    hass.data[_CARD_REGISTERED_KEY] = True
     _LOGGER.info(
         "Universal Remote Card registered at %s (v=%s)", _CARD_URL, version
     )
@@ -69,10 +81,6 @@ async def _async_register_card(hass: HomeAssistant) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Universal Remote from a config entry."""
-    # Register the Lovelace card resource on first entry setup.
-    # Safe to call multiple times — it's gated by hass.data.
-    await _async_register_card(hass)
-
     coordinator = UniversalRemoteCoordinator(hass, entry)
     try:
         await coordinator.async_setup()
