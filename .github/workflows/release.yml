@@ -35,13 +35,10 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
 
-      - name: Create zip
-        run: |
-          cd custom_components/universal_remote
-          zip -r ../../universal_remote.zip .
-
       - name: Create GitHub Release
+        # No zip asset — HACS will pull from the tagged commit directly,
+        # which matches the `content_in_root: false` layout in hacs.json
+        # (i.e. it expects `custom_components/<domain>/` at the repo root).
         uses: softprops/action-gh-release@v2
         with:
-          files: universal_remote.zip
           generate_release_notes: true
