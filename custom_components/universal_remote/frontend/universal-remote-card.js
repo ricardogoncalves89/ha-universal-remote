@@ -1,5 +1,5 @@
 /**
- * Universal Remote Card v0.6.3
+ * Universal Remote Card v0.7.0
  *
  * Physical-remote-style Lovelace card for the Universal Remote
  * Home Assistant integration. Mobile-first, light/dark themed.
@@ -106,6 +106,10 @@ function normaliseConfig(config) {
                 entity: r.entity,
                 media_player_entity: r.media_player_entity || null,
                 label: r.label || `TV ${i + 1}`,
+                // Per-TV command name overrides (IR blasters need
+                // literal command names or raw IR payloads, not our
+                // canonical UPPERCASE names).
+                commands: r.commands || null,
             };
         });
         return { mode: "multi", remotes };
@@ -118,6 +122,7 @@ function normaliseConfig(config) {
                     entity: config.entity,
                     media_player_entity: config.media_player_entity || null,
                     label: config.title || null,
+                    commands: config.commands || null,
                 },
             ],
         };
@@ -242,9 +247,21 @@ class UniversalRemoteCard extends HTMLElement {
         const r = this._currentRemote();
         if (!r || !r.entity) return;
         this._haptic();
+        // Apply per-TV command override if configured. For IR blasters
+        // (Astrion, Broadlink, ESPHome IR), the override is typically
+        // the raw IR payload (base64 or pulse-timing string) since the
+        // blaster has no notion of canonical names. For TVs handled by
+        // a brand-specific adapter (LG/Samsung/Apple), there's no
+        // commands map and the canonical name passes through.
+        const command =
+            r.commands &&
+            r.commands[cmd] !== undefined &&
+            r.commands[cmd] !== ""
+                ? r.commands[cmd]
+                : cmd;
         this._hass.callService("remote", "send_command", {
             entity_id: r.entity,
-            command: cmd,
+            command,
         });
     }
 
@@ -253,7 +270,24 @@ class UniversalRemoteCard extends HTMLElement {
         const r = this._currentRemote();
         if (!r || !r.entity) return;
         this._haptic();
-        this._hass.callService("remote", "toggle", { entity_id: r.entity });
+        // For IR blasters, remote.toggle doesn't work (no state
+        // visibility). If the TV has a POWER command override, treat
+        // it as the toggle action — IR remotes typically have a single
+        // POWER button that flips the device's state.
+        if (
+            r.commands &&
+            r.commands.POWER !== undefined &&
+            r.commands.POWER !== ""
+        ) {
+            this._hass.callService("remote", "send_command", {
+                entity_id: r.entity,
+                command: r.commands.POWER,
+            });
+        } else {
+            this._hass.callService("remote", "toggle", {
+                entity_id: r.entity,
+            });
+        }
     }
 
     _selectSource(source) {
@@ -278,15 +312,17 @@ class UniversalRemoteCard extends HTMLElement {
         const r = this._currentRemote();
         if (!r) return;
         this._haptic();
+        // Priority: if there's a media_player entity, use its toggle
+        // service — it already knows the current state. Otherwise (IR
+        // blasters etc.) fall back to the PLAY command, which gets
+        // run through _sendCommand and picks up the commands override
+        // automatically (e.g. Formuler's base64 IR payload for PLAY).
         if (r.media_player_entity) {
             this._hass.callService("media_player", "media_play_pause", {
                 entity_id: r.media_player_entity,
             });
         } else if (r.entity) {
-            this._hass.callService("remote", "send_command", {
-                entity_id: r.entity,
-                command: "PLAY",
-            });
+            this._sendCommand("PLAY");
         }
     }
 
@@ -1327,7 +1363,7 @@ if (
 }
 
 console.info(
-    "%c UNIVERSAL-REMOTE-CARD %c v0.6.3 ",
+    "%c UNIVERSAL-REMOTE-CARD %c v0.7.0 ",
     "color: white; background: #d8454a; padding: 2px 4px; border-radius: 3px 0 0 3px;",
     "color: white; background: #444; padding: 2px 4px; border-radius: 0 3px 3px 0;",
 );
