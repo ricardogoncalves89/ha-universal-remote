@@ -123,12 +123,14 @@ _BUTTON_MAP: dict[str, str] = {
 # in the same source picker.
 _HARDCODED_APPS: dict[str, str] = {
     # Native TV functions (sent as keys, not app launches).
-    # Smart Monitors (e.g. TU27F6005) don't have a direct KEY_TV shortcut —
-    # the only reliable way to reach Live TV is to open the source picker
-    # with KEY_SOURCE and let the user pick "TV" from the on-screen menu.
-    "Live TV":      "KEY_SOURCE",
-    # Streaming apps (launched via REST PUT — the WS path is deprecated
-    # on Tizen 2022+ and silently no-ops).
+    # The official HA samsungtv integration uses exactly these mappings —
+    # KEY_TV switches to the built-in tuner on Tizen TVs. Smart Monitors
+    # *should* respond to it too; if they don't, that's a permission
+    # issue (see _WS_CLIENT_NAME in the adapter class).
+    "Live TV":      "KEY_TV",
+    # Streaming apps (launched via WS ChannelEmitCommand — same path
+    # as the official HA samsungtv integration). If the WS path doesn't
+    # work for your firmware, the REST PUT fallback can be re-enabled.
     "Netflix":      "3201907018807",
     "YouTube":      "111299001912",
     "Disney+":      "3201901017640",
@@ -144,6 +146,16 @@ _HARDCODED_APPS: dict[str, str] = {
 
 class SamsungTizenAdapter(RemoteAdapter):
     """Adapter for Samsung Tizen TVs (2016+) over WebSocket SSL on port 8002."""
+
+    # The WebSocket client name sent on the URL — this is what shows up in
+    # the TV's "Device Connection Manager → Device List" and may influence
+    # the permissions the TV grants. Some Tizen firmwares appear to give
+    # well-known names ("HomeAssistant", "SmartThings") elevated privileges
+    # for source switching and app launching, while custom names get a
+    # reduced permission set (basic keys work, source-switching doesn't).
+    # We hardcode this to match the official HA samsungtv integration's
+    # behaviour exactly.
+    _WS_CLIENT_NAME = "HomeAssistant"
 
     SUPPORTED_BUTTONS = set(_BUTTON_MAP.keys()) | {
         Button.POWER,
@@ -164,7 +176,10 @@ class SamsungTizenAdapter(RemoteAdapter):
         self._host: str = config[CONF_HOST]
         self._mac: str | None = config.get(CONF_MAC)
         self._token: str | None = config.get(CONF_SAMSUNG_TOKEN)
-        self._name: str = config.get("name", "Universal Remote")
+        # NOTE: config["name"] is the display name for HA (e.g. "TV Escritório").
+        # The WebSocket client name we send TO THE TV is _WS_CLIENT_NAME
+        # ("HomeAssistant") — hardcoded to match the official integration so
+        # we get the same permission level for source switching and apps.
 
         self._remote: Any = None  # SamsungTVWSAsyncRemote
         self._connect_lock = asyncio.Lock()
@@ -221,7 +236,7 @@ class SamsungTizenAdapter(RemoteAdapter):
                     host=self._host,
                     port=8002,
                     token=self._token,
-                    name=self._name,
+                    name=self._WS_CLIENT_NAME,
                     timeout=5,
                 )
                 # start_listening keeps the websocket alive between commands.
@@ -556,14 +571,21 @@ class SamsungTizenAdapter(RemoteAdapter):
     async def select_source(self, source: str) -> None:
         """Open a source — either a Tizen key sequence or a Tizen app.
 
-        On Tizen 2022+ the WebSocket `ed.apps.launch` command is deprecated
-        by Samsung and silently ignored (TV reports success but nothing
-        launches). We use the REST endpoint instead, which still works:
-            PUT http://<host>:8001/api/v2/applications/<app_id>
+        Mirrors the official HA samsungtv integration's behaviour:
 
-        Source map values starting with "KEY_" are sent as remote keys
-        (e.g. "Live TV" -> KEY_SOURCE opens the source picker on the TV).
-        Everything else is treated as a Tizen app ID for the REST launch.
+          * Entries that start with "KEY_" are sent as remote keys via the
+            same `SendRemoteKey.click(...)` path used for normal buttons.
+            "Live TV" -> "KEY_TV" switches to the built-in tuner.
+
+          * Everything else is treated as a Tizen app ID and launched via
+            the WS `ed.apps.launch` event (ChannelEmitCommand.launch_app).
+            Same code path the official integration uses.
+
+        If the WS app launch silently no-ops on your firmware (Samsung
+        deprecated `ed.apps.launch` on some Tizen 2022+ builds), and the
+        permission hypothesis from `_WS_CLIENT_NAME` doesn't resolve it,
+        we fall back to a REST PUT (commented-out below — re-enable if
+        needed).
         """
         value = self._source_map.get(source)
         if not value:
@@ -594,43 +616,41 @@ class SamsungTizenAdapter(RemoteAdapter):
             await self._send_key(value)
             return
 
-        # App launch via REST PUT. Tizen exposes this on port 8001 (HTTP,
-        # no auth). Note: this is the SAME endpoint that the deprecated
-        # WS `launch_app` shim falls back to on newer TVs — the REST
-        # endpoint is what still actually works in 2022+ firmwares.
-        url = f"http://{self._host}:8001/api/v2/applications/{value}"
-        _LOGGER.debug("Samsung REST PUT %s (source %r)", url, source)
-
+        # App launch via WebSocket (same as official HA samsungtv).
         try:
-            import aiohttp
+            from samsungtvws.remote import ChannelEmitCommand
         except ImportError as err:
             raise AdapterConnectionError(
-                f"aiohttp not available for REST app launch: {err}"
+                f"samsungtvws missing ChannelEmitCommand: {err}"
             ) from err
 
-        timeout = aiohttp.ClientTimeout(total=5.0)
+        await self._ensure_connected()
+
+        cmd = ChannelEmitCommand.launch_app(value)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.put(url) as resp:
-                    body = await resp.text()
-                    _LOGGER.debug(
-                        "Samsung REST launch_app(%s) -> HTTP %s: %s",
-                        value, resp.status, body[:200],
-                    )
-                    if resp.status >= 400:
-                        raise AdapterConnectionError(
-                            f"REST launch_app({source!r}) returned "
-                            f"HTTP {resp.status}: {body[:200]}"
-                        )
-        except aiohttp.ClientError as err:
-            raise AdapterConnectionError(
-                f"REST launch_app({source!r}) failed: "
-                f"{type(err).__name__}: {err}"
-            ) from err
-        except asyncio.TimeoutError as err:
-            raise AdapterConnectionError(
-                f"REST launch_app({source!r}) timed out"
-            ) from err
+            await self._remote.send_commands([cmd])
+            _LOGGER.debug(
+                "Samsung launch_app(%s) sent for source %r", value, source
+            )
+        except Exception as err:  # noqa: BLE001
+            err_name = type(err).__name__
+            _LOGGER.debug(
+                "Samsung launch_app(%s) failed: %s: %s — reconnecting",
+                value, err_name, err,
+            )
+            await self._reset_remote()
+            try:
+                await self._ensure_connected()
+                await self._remote.send_commands([cmd])
+                _LOGGER.debug(
+                    "Samsung launch_app(%s) sent after reconnect", value
+                )
+            except Exception as err2:  # noqa: BLE001
+                await self._reset_remote()
+                raise AdapterConnectionError(
+                    f"launch_app({source!r}) failed: "
+                    f"{type(err2).__name__}: {err2}"
+                ) from err2
 
     async def play(self) -> None:
         await self.press_button(Button.PLAY)

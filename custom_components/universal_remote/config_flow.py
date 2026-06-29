@@ -393,13 +393,17 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             # Attempt pairing — this triggers the popup on the TV.
+            # NOTE: the WebSocket client name is hardcoded to "HomeAssistant"
+            # (matching the official HA samsungtv integration) — see the
+            # adapter for why this matters. The user-provided `name` is used
+            # only as the HA entity title.
             token: str | None = None
             try:
                 remote = SamsungTVWSAsyncRemote(
                     host=host,
                     port=8002,
                     token=None,
-                    name=name,
+                    name="HomeAssistant",
                     timeout=31,  # give user time to accept on TV
                 )
                 await remote.start_listening()
