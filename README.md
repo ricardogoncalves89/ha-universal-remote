@@ -119,6 +119,37 @@ remote_entity: remote.lg_sala
 
 The same config block works for every TV — just swap `entity` and `remote_entity`.
 
+## Lovelace card — `Universal Remote Card`
+
+The integration ships its own physical-remote-style Lovelace card. It's
+**bundled inside the integration** — once you install via HACS and restart
+HA, the card is registered automatically. No manual `/config/www/` copying,
+no Lovelace resource to add.
+
+### Add to a dashboard
+
+1. Edit your dashboard → **Add Card** → search for **Universal Remote Card**
+   (or pick it from the "Custom" section).
+2. The card's **visual editor** opens with entity pickers for the
+   `remote.*` entity (required) and `media_player.*` entity (recommended).
+3. Optionally set a title.
+
+### YAML config (manual)
+
+```yaml
+type: custom:universal-remote-card
+entity: remote.tv_escritorio                # required
+media_player_entity: media_player.tv_escritorio
+title: TV Escritório                        # optional; defaults to friendly_name
+```
+
+The card pulls sources live from the media_player's `source_list`. It
+recognises Netflix / YouTube / Amazon Prime Video / Disney+ and renders
+their official logos (from the [dashboard-icons](https://dashboardicons.com)
+CC0 collection via jsDelivr); HDMI sources show their full label
+(`HDMI 1`, `HDMI ARC`); Live TV gets a TV icon; everything else falls
+back to a neutral initials pill.
+
 ## Architecture
 
 ```
