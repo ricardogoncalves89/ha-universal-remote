@@ -330,9 +330,7 @@ class AppleTVAdapter(RemoteAdapter):
         "Fitness": "com.apple.Fitness",
         "Photos": "com.apple.TVPhotos",
         "Settings": "com.apple.TVSettings",
-        # Portugal-specific. Bundle ID confirmed via `atvremote ... app` while
-        # Vodafone TV was open on the Apple TV. UPDATE this string if launch_app
-        # fails — see comment block above.
+        # Portugal-specific. Bundle ID confirmed empirically by Ricardo.
         "Vodafone TV": "com.vodafone.vtv.pt",
     }
 

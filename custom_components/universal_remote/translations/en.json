@@ -41,6 +41,15 @@
         "data": {
           "pin": "PIN shown on the Apple TV"
         }
+      },
+      "samsung": {
+        "title": "Samsung Tizen TV",
+        "description": "Enter the IP/hostname and MAC of the Samsung TV. When you submit, the TV will show a popup — accept it within 30 seconds to authorise this integration. MAC is required for Wake-on-LAN.",
+        "data": {
+          "name": "Name",
+          "host": "Host / IP",
+          "mac": "MAC address"
+        }
       }
     },
     "error": {

@@ -24,7 +24,9 @@ def build_adapter(
         return LGWebOSAdapter(config, service_caller)
 
     if device_type == DEVICE_TYPE_SAMSUNG:
-        raise NotImplementedError("Samsung adapter not implemented yet")
+        from .samsung import SamsungTizenAdapter
+
+        return SamsungTizenAdapter(config, service_caller)
 
     if device_type == DEVICE_TYPE_ANDROID_TV:
         raise NotImplementedError("Android TV adapter not implemented yet")

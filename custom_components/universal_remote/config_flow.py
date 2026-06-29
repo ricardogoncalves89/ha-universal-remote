@@ -19,6 +19,7 @@ from .const import (
     DEVICE_TYPE_APPLE_TV,
     DEVICE_TYPE_LABELS,
     DEVICE_TYPE_LG_WEBOS,
+    DEVICE_TYPE_SAMSUNG,
     DEVICE_TYPES,
     DOMAIN,
 )
@@ -56,6 +57,8 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_lg_webos()
             if self._device_type == DEVICE_TYPE_APPLE_TV:
                 return await self.async_step_apple_tv_scan()
+            if self._device_type == DEVICE_TYPE_SAMSUNG:
+                return await self.async_step_samsung()
             return self.async_abort(reason="device_type_not_implemented")
 
         schema = vol.Schema(
@@ -352,6 +355,108 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title=self._atv_chosen.name,
             data=entry_data,
         )
+
+    # ----- Samsung Tizen: host+name+MAC -> pair (accept on TV) -> done -----
+
+    async def async_step_samsung(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Single-step Samsung config: ask for IP, name, MAC, then attempt
+        a websocket connection — the TV pops up a permission prompt.
+
+        On success we get back a token and persist it. On user denial or
+        timeout we surface a clear error.
+        """
+        errors: dict[str, str] = {}
+
+        defaults = {
+            CONF_NAME: "Samsung TV",
+            CONF_HOST: "",
+            CONF_MAC: "",
+        }
+
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            mac = (user_input.get(CONF_MAC) or "").strip() or None
+            name = user_input[CONF_NAME].strip()
+            defaults = {CONF_NAME: name, CONF_HOST: host, CONF_MAC: mac or ""}
+
+            try:
+                from samsungtvws.async_remote import SamsungTVWSAsyncRemote
+            except ImportError:
+                _LOGGER.exception("samsungtvws library not available")
+                errors["base"] = "cannot_connect"
+                return self.async_show_form(
+                    step_id="samsung",
+                    data_schema=self._samsung_schema(defaults),
+                    errors=errors,
+                )
+
+            # Attempt pairing — this triggers the popup on the TV.
+            token: str | None = None
+            try:
+                remote = SamsungTVWSAsyncRemote(
+                    host=host,
+                    port=8002,
+                    token=None,
+                    name=name,
+                    timeout=31,  # give user time to accept on TV
+                )
+                await remote.start_listening()
+                token = getattr(remote, "token", None)
+                try:
+                    await remote.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception as err:  # noqa: BLE001
+                err_name = type(err).__name__
+                _LOGGER.warning(
+                    "Samsung pairing failed for %s: %s: %s", host, err_name, err
+                )
+                if "Unauthorized" in err_name or "Unauthorized" in str(err):
+                    errors["base"] = "pair_refused"
+                else:
+                    errors["base"] = "cannot_connect"
+                return self.async_show_form(
+                    step_id="samsung",
+                    data_schema=self._samsung_schema(defaults),
+                    errors=errors,
+                )
+
+            if not token:
+                errors["base"] = "no_client_key"
+                return self.async_show_form(
+                    step_id="samsung",
+                    data_schema=self._samsung_schema(defaults),
+                    errors=errors,
+                )
+
+            await self.async_set_unique_id(f"samsung_{host}")
+            self._abort_if_unique_id_configured()
+
+            return self.async_create_entry(
+                title=name,
+                data={
+                    CONF_DEVICE_TYPE: DEVICE_TYPE_SAMSUNG,
+                    CONF_NAME: name,
+                    CONF_HOST: host,
+                    CONF_MAC: mac,
+                    "samsung_token": token,
+                },
+            )
+
+        return self.async_show_form(
+            step_id="samsung",
+            data_schema=self._samsung_schema(defaults),
+            errors=errors,
+        )
+
+    def _samsung_schema(self, defaults: dict[str, Any]) -> vol.Schema:
+        return vol.Schema({
+            vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, "Samsung TV")): str,
+            vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+            vol.Optional(CONF_MAC, default=defaults.get(CONF_MAC, "")): str,
+        })
 
     # ----- Reconfigure existing device -----
 
