@@ -16,7 +16,9 @@ from .adapters.base import AdapterAuthError, AdapterConnectionError
 from .const import (
     CONF_CLIENT_KEY,
     CONF_DEVICE_TYPE,
+    CONF_ESPHOME_SERVICE,
     DEVICE_TYPE_APPLE_TV,
+    DEVICE_TYPE_ESPHOME_IR,
     DEVICE_TYPE_LABELS,
     DEVICE_TYPE_LG_WEBOS,
     DEVICE_TYPE_SAMSUNG,
@@ -59,6 +61,8 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_apple_tv_scan()
             if self._device_type == DEVICE_TYPE_SAMSUNG:
                 return await self.async_step_samsung()
+            if self._device_type == DEVICE_TYPE_ESPHOME_IR:
+                return await self.async_step_esphome_ir()
             return self.async_abort(reason="device_type_not_implemented")
 
         schema = vol.Schema(
@@ -462,6 +466,87 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional(CONF_MAC, default=defaults.get(CONF_MAC, "")): str,
         })
 
+    # ----- ESPHome IR: name + pick esphome.*_send_command service -----
+
+    async def async_step_esphome_ir(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure a one-way IR blaster driven by an ESPHome node.
+
+        Expects the user to have already flashed their ESPHome device
+        with a `send_command(command: string)` service. We list every
+        `esphome.*_send_command` currently registered in HA and let
+        them pick one.
+        """
+        errors: dict[str, str] = {}
+
+        # Discover currently-registered esphome.* services ending in _send_command.
+        # This is much friendlier than asking the user to type the exact name.
+        esphome_services = self.hass.services.async_services().get("esphome", {})
+        candidates = sorted(
+            s for s in esphome_services.keys() if s.endswith("_send_command")
+        )
+
+        defaults = {CONF_NAME: "IR blaster", CONF_ESPHOME_SERVICE: ""}
+        if self._reconfigure_entry is not None:
+            data = self._reconfigure_entry.data
+            defaults = {
+                CONF_NAME: data.get(CONF_NAME, "IR blaster"),
+                CONF_ESPHOME_SERVICE: data.get(CONF_ESPHOME_SERVICE, ""),
+            }
+
+        if user_input is not None:
+            service_name = user_input[CONF_ESPHOME_SERVICE].strip()
+            # Basic sanity: the service must exist. We don't require it —
+            # user might set it up before the ESPHome node is online —
+            # but we warn.
+            if service_name and service_name not in esphome_services:
+                _LOGGER.warning(
+                    "Chosen ESPHome service esphome.%s is not currently "
+                    "registered — will retry when device comes online",
+                    service_name,
+                )
+
+            self._user_input = {
+                CONF_DEVICE_TYPE: DEVICE_TYPE_ESPHOME_IR,
+                CONF_NAME: user_input[CONF_NAME],
+                CONF_ESPHOME_SERVICE: service_name,
+            }
+
+            if self._reconfigure_entry is None:
+                await self.async_set_unique_id(
+                    f"{DEVICE_TYPE_ESPHOME_IR}_{service_name}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=user_input[CONF_NAME],
+                    data=self._user_input,
+                )
+            return self._finish_reconfigure()
+
+        # Build a friendly dropdown when we have candidates, otherwise a
+        # plain text field so the user can type the expected name.
+        if candidates:
+            service_field: Any = vol.In(candidates)
+        else:
+            service_field = str
+
+        schema = vol.Schema({
+            vol.Required(CONF_NAME, default=defaults[CONF_NAME]): str,
+            vol.Required(
+                CONF_ESPHOME_SERVICE,
+                default=defaults[CONF_ESPHOME_SERVICE],
+            ): service_field,
+        })
+        return self.async_show_form(
+            step_id="esphome_ir",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "discovered_count": str(len(candidates)),
+            },
+        )
+
     # ----- Reconfigure existing device -----
 
     async def async_step_reconfigure(
@@ -472,6 +557,8 @@ class UniversalRemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_type = self._reconfigure_entry.data[CONF_DEVICE_TYPE]
         if self._device_type == DEVICE_TYPE_LG_WEBOS:
             return await self.async_step_lg_webos()
+        if self._device_type == DEVICE_TYPE_ESPHOME_IR:
+            return await self.async_step_esphome_ir()
         return self.async_abort(reason="device_type_not_implemented")
 
     def _get_reconfigure_entry(self) -> ConfigEntry:

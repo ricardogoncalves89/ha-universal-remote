@@ -18,12 +18,14 @@ DEVICE_TYPE_LG_WEBOS: Final = "lg_webos"
 DEVICE_TYPE_SAMSUNG: Final = "samsung"
 DEVICE_TYPE_ANDROID_TV: Final = "android_tv"
 DEVICE_TYPE_APPLE_TV: Final = "apple_tv"
+DEVICE_TYPE_ESPHOME_IR: Final = "esphome_ir"
 
 DEVICE_TYPES: Final = [
     DEVICE_TYPE_LG_WEBOS,
     DEVICE_TYPE_SAMSUNG,
     DEVICE_TYPE_ANDROID_TV,
     DEVICE_TYPE_APPLE_TV,
+    DEVICE_TYPE_ESPHOME_IR,
 ]
 
 DEVICE_TYPE_LABELS: Final = {
@@ -31,7 +33,11 @@ DEVICE_TYPE_LABELS: Final = {
     DEVICE_TYPE_SAMSUNG: "Samsung Tizen",
     DEVICE_TYPE_ANDROID_TV: "Android TV / Google TV",
     DEVICE_TYPE_APPLE_TV: "Apple TV",
+    DEVICE_TYPE_ESPHOME_IR: "ESPHome IR blaster",
 }
+
+# ESPHome IR adapter config keys
+CONF_ESPHOME_SERVICE: Final = "esphome_service"  # e.g. "xiao_ir_formuler_send_command"
 
 # Canonical button vocabulary — every adapter MUST map these to its native commands.
 # Anything not listed here is rejected at the remote.send_command boundary.

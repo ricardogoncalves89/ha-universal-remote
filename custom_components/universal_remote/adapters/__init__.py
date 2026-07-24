@@ -6,6 +6,7 @@ from typing import Any
 from ..const import (
     DEVICE_TYPE_ANDROID_TV,
     DEVICE_TYPE_APPLE_TV,
+    DEVICE_TYPE_ESPHOME_IR,
     DEVICE_TYPE_LG_WEBOS,
     DEVICE_TYPE_SAMSUNG,
 )
@@ -35,5 +36,10 @@ def build_adapter(
         from .apple_tv import AppleTVAdapter
 
         return AppleTVAdapter(config, service_caller)
+
+    if device_type == DEVICE_TYPE_ESPHOME_IR:
+        from .esphome_ir import ESPHomeIRAdapter
+
+        return ESPHomeIRAdapter(config, service_caller)
 
     raise ValueError(f"Unknown device type: {device_type}")

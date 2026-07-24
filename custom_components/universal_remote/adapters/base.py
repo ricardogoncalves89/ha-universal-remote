@@ -66,6 +66,12 @@ class RemoteAdapter(ABC):
     # Calling press_button with a button outside this set raises UnsupportedButtonError.
     SUPPORTED_BUTTONS: set[str] = set()
 
+    # Whether this adapter produces a media_player entity. TV adapters
+    # do (they have source_list, playback state, etc.). One-way devices
+    # like IR blasters do not — setting this False makes the integration
+    # skip the media_player platform for that entry.
+    HAS_MEDIA_PLAYER: bool = True
+
     def __init__(
         self,
         config: dict[str, Any],

@@ -97,13 +97,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ) from err
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Only register the media_player platform if the underlying adapter
+    # actually produces media_player state (source_list, playback, etc.).
+    # IR-only adapters skip it — they'd just create an empty stub entity.
+    platforms: list[Platform] = [Platform.REMOTE]
+    if getattr(coordinator.adapter, "HAS_MEDIA_PLAYER", True):
+        platforms.append(Platform.MEDIA_PLAYER)
+    await hass.config_entries.async_forward_entry_setups(entry, platforms)
+    # Remember what we set up so unload uses the same list.
+    hass.data[DOMAIN][f"{entry.entry_id}__platforms"] = platforms
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    platforms = hass.data.get(DOMAIN, {}).pop(
+        f"{entry.entry_id}__platforms", None,
+    ) or [Platform.MEDIA_PLAYER, Platform.REMOTE]
+    unloaded = await hass.config_entries.async_unload_platforms(entry, platforms)
     if unloaded:
         coordinator: UniversalRemoteCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.async_shutdown()

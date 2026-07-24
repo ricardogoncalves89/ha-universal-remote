@@ -50,6 +50,14 @@
           "host": "Host / IP",
           "mac": "Endereço MAC"
         }
+      },
+      "esphome_ir": {
+        "title": "Emissor IR ESPHome",
+        "description": "Aponta a integração para um dispositivo ESPHome que exponha um serviço `send_command(command: string)` — tipicamente um ESP32 com `remote_transmitter` e um script que traduz nomes de comandos em pulsos IR. Foram descobertos {discovered_count} serviço(s) compatíveis.",
+        "data": {
+          "name": "Nome",
+          "esphome_service": "Serviço ESPHome"
+        }
       }
     },
     "error": {

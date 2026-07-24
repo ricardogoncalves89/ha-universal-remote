@@ -50,6 +50,14 @@
           "host": "Host / IP",
           "mac": "MAC address"
         }
+      },
+      "esphome_ir": {
+        "title": "ESPHome IR blaster",
+        "description": "Point the integration at an ESPHome node that exposes a `send_command(command: string)` service — typically an ESP32 with a `remote_transmitter` and a script that maps command names to IR pulses. {discovered_count} matching service(s) were discovered.",
+        "data": {
+          "name": "Name",
+          "esphome_service": "ESPHome service"
+        }
       }
     },
     "error": {
