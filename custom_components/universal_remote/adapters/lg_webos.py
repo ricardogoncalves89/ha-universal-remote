@@ -157,6 +157,7 @@ class LGWebOSAdapter(RemoteAdapter):
             try:
                 await self._client.connect()
             except WebOsTvPairError as err:
+                _LOGGER.warning("LG TV at %s refused pairing: %s", self._host, err)
                 self._client = None
                 raise AdapterAuthError(
                     "TV refused pairing — accept the prompt on the TV and retry"
